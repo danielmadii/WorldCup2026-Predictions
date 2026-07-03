@@ -52,9 +52,3 @@ export async function loadMatches(force = false): Promise<Match[]> {
   cache = { at: Date.now(), matches };
   return matches;
 }
-
-export function upcomingWorldCup(matches: Match[]): Match[] {
-  return matches
-    .filter((m) => m.tournament === "FIFA World Cup" && m.hs === null)
-    .sort((a, b) => a.date.localeCompare(b.date));
-}

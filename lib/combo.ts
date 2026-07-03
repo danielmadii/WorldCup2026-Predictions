@@ -3,8 +3,11 @@ import type { MatchModel } from "./model";
 export type Leg =
   | { market: "1x2"; pick: "home" | "draw" | "away" }
   | { market: "double_chance"; pick: "home_or_draw" | "home_or_away" | "draw_or_away" }
+  | { market: "dnb"; pick: "home" | "away" }
   | { market: "total"; pick: "over" | "under"; line: number }
-  | { market: "btts"; pick: "yes" | "no" };
+  | { market: "team_total"; team: "home" | "away"; pick: "over" | "under"; line: number }
+  | { market: "btts"; pick: "yes" | "no" }
+  | { market: "ah"; pick: "home" | "away"; line: number }; // line applies to the picked side
 
 export type OddsLeg = { leg: Leg; price: number };
 export type EventOdds = {
@@ -20,31 +23,94 @@ export function kelly(p: number, odds: number): number {
   return b > 0 ? Math.max(0, (p * odds - 1) / b) : 0;
 }
 
-function legHits(leg: Leg, h: number, a: number): boolean {
+/** Kelly with push mass: w/l are win/loss probabilities, pushes return the stake. */
+export function kellyPush(w: number, l: number, odds: number): number {
+  const b = odds - 1;
+  return b > 0 && w + l > 0 ? Math.max(0, (w * b - l) / (b * (w + l))) : 0;
+}
+
+// ---- settlement ----
+
+type Settled = "win" | "halfWin" | "push" | "halfLoss" | "loss";
+
+// .25/.75 lines split the stake across the adjacent half lines
+const isQuarterLine = (line: number) => (line * 2) % 1 !== 0;
+
+function half(lo: Settled, hi: Settled): Settled {
+  const s = (o: Settled) => (o === "win" ? 1 : o === "push" ? 0 : -1);
+  const t = s(lo) + s(hi);
+  return t === 2 ? "win" : t === 1 ? "halfWin" : t === 0 ? "push" : t === -1 ? "halfLoss" : "loss";
+}
+
+function settleOU(v: number, line: number, over: boolean): Settled {
+  if (isQuarterLine(line)) return half(settleOU(v, line - 0.25, over), settleOU(v, line + 0.25, over));
+  if (v === line) return "push";
+  return (over ? v > line : v < line) ? "win" : "loss";
+}
+
+function settleHandicap(margin: number, line: number): Settled {
+  if (isQuarterLine(line)) return half(settleHandicap(margin, line - 0.25), settleHandicap(margin, line + 0.25));
+  const x = margin + line;
+  if (x === 0) return "push";
+  return x > 0 ? "win" : "loss";
+}
+
+function settle(leg: Leg, h: number, a: number): Settled {
   switch (leg.market) {
     case "1x2":
-      return leg.pick === "home" ? h > a : leg.pick === "away" ? a > h : h === a;
+      return (leg.pick === "home" ? h > a : leg.pick === "away" ? a > h : h === a) ? "win" : "loss";
     case "double_chance":
-      return leg.pick === "home_or_draw"
-        ? h >= a
-        : leg.pick === "draw_or_away"
-          ? a >= h
-          : h !== a;
-    case "total":
-      return leg.pick === "over" ? h + a > leg.line : h + a < leg.line;
+      return (leg.pick === "home_or_draw" ? h >= a : leg.pick === "draw_or_away" ? a >= h : h !== a)
+        ? "win"
+        : "loss";
+    case "dnb":
+      if (h === a) return "push";
+      return (leg.pick === "home" ? h > a : a > h) ? "win" : "loss";
     case "btts":
-      return leg.pick === "yes" ? h >= 1 && a >= 1 : h === 0 || a === 0;
+      return (leg.pick === "yes" ? h >= 1 && a >= 1 : h === 0 || a === 0) ? "win" : "loss";
+    case "total":
+      return settleOU(h + a, leg.line, leg.pick === "over");
+    case "team_total":
+      return settleOU(leg.team === "home" ? h : a, leg.line, leg.pick === "over");
+    case "ah":
+      return settleHandicap(leg.pick === "home" ? h - a : a - h, leg.line);
   }
 }
 
-/** Exact joint probability of all legs hitting, from the score grid — correlation included. */
+export type LegEval = {
+  w: number; // win probability (half-wins count 0.5)
+  l: number; // loss probability (half-losses count 0.5)
+  push: number;
+  ev: number; // exact expected value per unit stake, pushes included
+  binary: boolean; // true when the leg can only win or lose (safe for combos)
+};
+
+export function evalLeg(grid: number[][], leg: Leg, price: number): LegEval {
+  let w = 0, l = 0, push = 0, ret = 0, binary = true;
+  for (let h = 0; h < grid.length; h++)
+    for (let a = 0; a < grid[h].length; a++) {
+      const p = grid[h][a];
+      switch (settle(leg, h, a)) {
+        case "win": ret += p * price; w += p; break;
+        case "halfWin": ret += (p * (price + 1)) / 2; w += p / 2; push += p / 2; binary = false; break;
+        case "push": ret += p; push += p; binary = false; break;
+        case "halfLoss": ret += p / 2; l += p / 2; push += p / 2; binary = false; break;
+        case "loss": l += p; break;
+      }
+    }
+  return { w, l, push, ev: ret - 1, binary };
+}
+
+/** Exact joint probability of all legs winning, from the score grid — correlation included. */
 export function jointProb(grid: number[][], legs: Leg[]): number {
   let p = 0;
   for (let h = 0; h < grid.length; h++)
     for (let a = 0; a < grid[h].length; a++)
-      if (legs.every((l) => legHits(l, h, a))) p += grid[h][a];
+      if (legs.every((l) => settle(l, h, a) === "win")) p += grid[h][a];
   return p;
 }
+
+const fmtLine = (line: number) => (line > 0 ? `+${line}` : `${line}`);
 
 export function legLabel(leg: Leg, home: string, away: string): string {
   switch (leg.market) {
@@ -56,10 +122,16 @@ export function legLabel(leg: Leg, home: string, away: string): string {
         : leg.pick === "draw_or_away"
           ? `${away} or draw`
           : `${home} or ${away}`;
+    case "dnb":
+      return `${leg.pick === "home" ? home : away} (draw no bet)`;
     case "total":
       return `${leg.pick === "over" ? "Over" : "Under"} ${leg.line} goals`;
+    case "team_total":
+      return `${leg.team === "home" ? home : away} ${leg.pick} ${leg.line} goals`;
     case "btts":
       return `Both teams to score: ${leg.pick}`;
+    case "ah":
+      return `${leg.pick === "home" ? home : away} ${fmtLine(leg.line)} (Asian)`;
   }
 }
 
@@ -102,10 +174,11 @@ export function buildBetBuilders(
   const all: BuilderPick[] = [];
   for (const e of events) {
     const grid = model.scoreGrid(e.home, e.away, true);
+    // combos need win-or-lose legs only: pushes would void a leg, not the ticket
     const cands = e.legs
-      .map((l) => ({ ...l, p: jointProb(grid, [l.leg]) }))
-      .filter((l) => l.p >= 0.15 && l.p <= 0.92)
-      .sort((x, y) => y.p * y.price - x.p * x.price)
+      .map((l) => ({ ...l, ...evalLeg(grid, l.leg, l.price) }))
+      .filter((l) => l.binary && l.w >= 0.15 && l.w <= 0.92)
+      .sort((x, y) => y.w * y.price - x.w * x.price)
       .slice(0, 14);
     const matchPicks: BuilderPick[] = [];
     for (let k = 2; k <= maxLegs; k++)
@@ -123,7 +196,7 @@ export function buildBetBuilders(
         }
         if (redundant) continue;
         const combinedOdds = legs.reduce((x, l) => x * l.price, 1);
-        const naiveProb = legs.reduce((x, l) => x * l.p, 1);
+        const naiveProb = legs.reduce((x, l) => x * l.w, 1);
         const edge = joint * combinedOdds - 1;
         if (edge < minEdge) continue;
         matchPicks.push({
@@ -132,7 +205,7 @@ export function buildBetBuilders(
           legs: legs.map((l) => ({
             label: legLabel(l.leg, e.home, e.away),
             odds: l.price,
-            modelProb: l.p,
+            modelProb: l.w,
           })),
           combinedOdds,
           modelProb: joint,
@@ -176,16 +249,16 @@ export function buildParlays(
     const grid = model.scoreGrid(e.home, e.away, true);
     let best: PoolLeg | null = null;
     for (const { leg, price } of e.legs) {
-      const p = jointProb(grid, [leg]);
-      if (p < minLegProb) continue;
-      const edge = p * price - 1;
+      const ev = evalLeg(grid, leg, price);
+      if (!ev.binary || ev.w < minLegProb) continue;
+      const edge = ev.w * price - 1;
       if (edge >= minLegEdge && (!best || edge > best.edge))
         best = {
           match: `${e.home} vs ${e.away}`,
           date: e.date,
           label: legLabel(leg, e.home, e.away),
           odds: price,
-          p,
+          p: ev.w,
           edge,
         };
     }
