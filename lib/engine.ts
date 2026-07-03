@@ -114,8 +114,12 @@ function parseLegs(markets: any): OddsLeg[] {
   return [...best.values()];
 }
 
+let oddsCache: { at: number; events: EventOdds[] } | null = null;
+const ODDS_TTL_MS = 20_000; // several endpoints scan per page load; don't hammer Cloudbet
+
 /** Bulk ingestion: one request returns all events with the requested markets. */
 export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
+  if (oddsCache && Date.now() - oddsCache.at < ODDS_TTL_MS) return oddsCache.events;
   const sport = await cb("/v2/odds/sports/soccer");
   let compKey: string | null = null;
   for (const cat of sport.categories ?? [])
@@ -128,15 +132,24 @@ export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
   const comp = await cb(`/v2/odds/competitions/${compKey}?${qs}`);
   const events: EventOdds[] = [];
   for (const ev of comp.events ?? []) {
-    // TRADING = open pre-match; the model prices pre-match only, skip live/resulted.
-    if (ev.status !== "TRADING") continue;
+    // pre-match feeds the model; live events are scanned for pricing anomalies only
+    if (ev.status !== "TRADING" && ev.status !== "TRADING_LIVE") continue;
     const home = norm(ev.home?.name ?? "");
     const away = norm(ev.away?.name ?? "");
     if (!home || !away) continue;
     const legs = parseLegs(ev.markets);
     if (legs.length)
-      events.push({ id: ev.id, home, away, date: ev.cutoffTime ?? undefined, legs });
+      events.push({
+        id: ev.id,
+        home,
+        away,
+        date: ev.cutoffTime ?? undefined,
+        live: ev.status === "TRADING_LIVE",
+        legs,
+      });
   }
+  events.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
+  oddsCache = { at: Date.now(), events };
   return events;
 }
 
@@ -151,10 +164,11 @@ export type ValuePick = {
   kellyQuarter: number;
 };
 
-export async function findValueBets(minEdge = 0.03): Promise<ValuePick[]> {
+export async function findValueBets(minEdge = 0.03, ids?: Set<number>): Promise<ValuePick[]> {
   const [{ model }, events] = await Promise.all([getModel(), fetchWorldCupOdds()]);
   const picks: ValuePick[] = [];
   for (const ev of events) {
+    if (ev.live || (ids && !ids.has(ev.id))) continue;
     const grid = model.scoreGrid(ev.home, ev.away, true);
     for (const { leg, price } of ev.legs) {
       const e = evalLeg(grid, leg, price);

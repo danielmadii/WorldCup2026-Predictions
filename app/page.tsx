@@ -17,6 +17,18 @@ type ParlayPick = {
   combinedOdds: number; modelProb: number; impliedProb: number;
   ev: number; kellyQuarter: number;
 };
+type Anomaly = {
+  match: string; date?: string; live: boolean;
+  kind: "arb" | "contradiction" | "mispriced-pair";
+  note: string; edge: number;
+};
+type MatchInfo = { id: number; home: string; away: string; date?: string };
+
+const KIND_LABEL: Record<Anomaly["kind"], string> = {
+  arb: "Arbitrage",
+  contradiction: "Contradiction",
+  "mispriced-pair": "Mispriced pair",
+};
 
 const pct = (x: number) => `${(100 * x).toFixed(x < 0.01 ? 2 : 1)}%`;
 const xOdds = (o: number) => (o >= 1000 ? Math.round(o).toLocaleString("en-US") : o.toFixed(2));
@@ -46,17 +58,21 @@ function Skeleton({ rows = 4 }: { rows?: number }) {
 }
 
 export default function Page() {
-  const [tab, setTab] = useState<"value" | "builders" | "parlays" | "yolo">("value");
+  const [tab, setTab] = useState<"value" | "builders" | "parlays" | "yolo" | "anoms">("value");
   const [bankroll, setBankroll] = useState(10);
   const [minEdge, setMinEdge] = useState(0.03);
   const [value, setValue] = useState<ValuePick[] | null>(null);
   const [builders, setBuilders] = useState<BuilderPick[] | null>(null);
   const [parlays, setParlays] = useState<ParlayPick[] | null>(null);
   const [yolo, setYolo] = useState<ParlayPick[] | null>(null);
+  const [anoms, setAnoms] = useState<Anomaly[] | null>(null);
+  const [matches, setMatches] = useState<MatchInfo[] | null>(null);
+  const [sel, setSel] = useState<Set<number> | null>(null); // null = all matches
+  const [autoRef, setAutoRef] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const scan = async (edge = minEdge) => {
+  const scan = async (edge = minEdge, selected = sel) => {
     setBusy(true); setErr("");
     try {
       const get = async (url: string) => {
@@ -65,18 +81,36 @@ export default function Page() {
         if (!r.ok) throw new Error(j.error ?? "request failed");
         return j;
       };
-      const [v, c] = await Promise.all([
-        get(`/api/value?minEdge=${edge}`),
-        get(`/api/parlay?minEdge=${Math.max(edge, 0.05)}&maxLegs=3`),
+      const ids = selected ? `&ids=${[...selected].join(",")}` : "";
+      const [v, c, a, m] = await Promise.all([
+        get(`/api/value?minEdge=${edge}${ids}`),
+        get(`/api/parlay?minEdge=${Math.max(edge, 0.05)}&maxLegs=3${ids}`),
+        get(`/api/anomalies`),
+        get(`/api/matches`),
       ]);
       setValue(v.picks);
       setBuilders(c.builders);
       setParlays(c.parlays);
       setYolo(c.yolo);
+      setAnoms(a.anomalies);
+      setMatches(m.matches);
     } catch (e: any) { setErr(e.message); }
     setBusy(false);
   };
   useEffect(() => { scan(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // anomalies decay fast — poll while the tab is open
+  useEffect(() => {
+    if (tab !== "anoms" || !autoRef) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch("/api/anomalies");
+        const j = await r.json();
+        if (r.ok) setAnoms(j.anomalies);
+      } catch {}
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [tab, autoRef]);
 
   const money = (x: number) => `$${x >= 20 ? Math.round(x) : x.toFixed(2)}`;
   const stake = (kq: number) => money(bankroll * kq);
@@ -165,6 +199,39 @@ export default function Page() {
             <dd>What comes back if the bet wins — bet × odds, your stake included.</dd>
           </div>
         </dl>
+        {matches && matches.length > 0 && (
+          <details className="picker">
+            <summary>
+              Matches — {sel ? sel.size : matches.length} of {matches.length} selected
+              <span className="hint">pick the games you want bets on, then Rescan</span>
+            </summary>
+            <div className="pickbar">
+              <button className="btn ghost" onClick={() => setSel(null)}>All</button>
+              <button className="btn ghost" onClick={() => setSel(new Set())}>None</button>
+            </div>
+            <div className="pickgrid">
+              {matches.map((m) => {
+                const on = sel ? sel.has(m.id) : true;
+                return (
+                  <label key={m.id} className={`pick ${on ? "on" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => {
+                        const next = new Set(sel ?? matches.map((x) => x.id));
+                        if (on) next.delete(m.id);
+                        else next.add(m.id);
+                        setSel(next.size === matches.length ? null : next);
+                      }}
+                    />
+                    <span className="sub">{day(m.date)}</span>
+                    <span>{m.home} vs {m.away}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </details>
+        )}
       </section>
 
       {needsKey && (
@@ -190,6 +257,7 @@ export default function Page() {
           ["builders", "Bet builders", builders?.length],
           ["parlays", "Parlays", parlays?.length],
           ["yolo", "YOLO bets", yolo?.length],
+          ["anoms", "Anomalies", anoms?.length],
         ] as const).map(([k, label, n]) => (
           <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>
             {label}{n !== undefined && <span className="count">{n}</span>}
@@ -371,9 +439,66 @@ export default function Page() {
               ))}
             </div>
             <div className="note">
-              Every leg is a bet the model rates at or above the bookmaker&apos;s price — this is the
-              smartest route to 1,000×, not a safe one. Even the best ticket loses ~99% of the time:
-              stake pocket change you&apos;d happily burn.
+              This is a lottery ticket, engineered: the legs lean toward the model&apos;s picks, but at
+              1,000× nothing is safe — expect to lose this ~99% of the time. Stake pocket change
+              you&apos;d happily burn for the sweat.
+            </div>
+          </>
+        )}
+      </section>
+      )}
+
+      {tab === "anoms" && (
+      <section className="panel">
+        <div className="head">
+          Anomalies <small>pricing errors on the board — live and pre-match</small>
+          <label className="check">
+            <input type="checkbox" checked={autoRef} onChange={(e) => setAutoRef(e.target.checked)} />
+            auto-refresh 60s
+          </label>
+        </div>
+        {loading && !anoms && <Skeleton rows={4} />}
+        {anoms && anoms.length === 0 && (
+          <div className="note">
+            No pricing errors right now — the book is internally consistent. Errors surface most
+            during live matches; keep auto-refresh on while games are playing.
+          </div>
+        )}
+        {anoms && anoms.length > 0 && (
+          <>
+            <div style={{ overflowX: "auto" }}>
+              <table className="board">
+                <thead>
+                  <tr>
+                    <th>Match</th><th>Type</th><th>What&apos;s wrong</th><th className="num">Size</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {anoms.map((a, i) => (
+                    <tr key={i}>
+                      <td>
+                        <span className="team">{a.match}</span>
+                        {a.live && <span className="pill-live">LIVE</span>}
+                        {a.date && !a.live && <div className="sub">{day(a.date)}</div>}
+                      </td>
+                      <td><span className="chip">{KIND_LABEL[a.kind]}</span></td>
+                      <td style={{ maxWidth: 420 }}>{a.note}</td>
+                      <td className="num">
+                        {a.kind === "arb"
+                          ? `+${(100 * a.edge).toFixed(2)}% locked`
+                          : `${(100 * a.edge).toFixed(1)}pp gap`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="note">
+              <b>Arbitrage</b>: backing every outcome returns a profit whatever happens.{" "}
+              <b>Contradiction</b>: an outcome priced more likely than another it logically implies.{" "}
+              <b>Mispriced pair</b>: two bets that settle identically at different prices — take the bigger one.
+              Verify on Cloudbet before betting: these vanish in seconds, and an Affiliate API key
+              lags up to a minute behind the real board (use a Trading key for this tab).
             </div>
           </>
         )}

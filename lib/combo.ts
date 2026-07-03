@@ -15,6 +15,7 @@ export type EventOdds = {
   home: string;
   away: string;
   date?: string;
+  live?: boolean;
   legs: OddsLeg[];
 };
 
@@ -271,10 +272,13 @@ export function buildYoloParlays(
     return pool.sort((x, y) => y.eff - x.eff);
   };
 
-  // prefer +EV legs; relax to near-fair legs if they can't reach the target
+  // YOLO never comes back empty: prefer +EV legs, relax to near-fair, then to
+  // anything on the board — efficiency ranking still favors the model's picks
+  const canReach = (p: { odds: number }[]) =>
+    p.reduce((s, l) => s + Math.log(l.odds), 0) >= Math.log(targetOdds);
   let pool = poolFor(0);
-  if (pool.reduce((s, l) => s + Math.log(l.odds), 0) < Math.log(targetOdds))
-    pool = poolFor(-0.05);
+  if (!canReach(pool)) pool = poolFor(-0.05);
+  if (!canReach(pool)) pool = poolFor(-Infinity);
 
   // disjoint tickets: each takes the best remaining legs until the target is hit
   const out: ParlayPick[] = [];
