@@ -73,6 +73,14 @@ export class MatchModel {
     return [Math.exp(this.a + this.b * d), Math.exp(this.a - this.b * d)];
   }
 
+  /** Joint score PMF over 0..MAX_GOALS × 0..MAX_GOALS (independent Poissons). */
+  scoreGrid(home: string, away: string, neutral = true): number[][] {
+    const [lh, la] = this.lambdas(home, away, neutral);
+    const gh = poissonPmf(lh, MAX_GOALS);
+    const ga = poissonPmf(la, MAX_GOALS);
+    return gh.map((ph) => ga.map((pa) => ph * pa));
+  }
+
   predict(home: string, away: string, neutral = true): Prediction {
     const [lh, la] = this.lambdas(home, away, neutral);
     const gh = poissonPmf(lh, MAX_GOALS);

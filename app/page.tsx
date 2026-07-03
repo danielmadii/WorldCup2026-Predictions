@@ -19,7 +19,7 @@ const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
 const fair = (p: number) => (p > 0 ? (1 / p).toFixed(2) : "—");
 
 export default function Page() {
-  const [tab, setTab] = useState<"board" | "match" | "sim" | "value" | "ratings">("board");
+  const [tab, setTab] = useState<"board" | "match" | "sim" | "value" | "parlay" | "ratings">("board");
   const [state, setState] = useState<State | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -51,7 +51,7 @@ export default function Page() {
       </header>
 
       <nav className="tabs" aria-label="Sections">
-        {([["board", "Fixtures"], ["match", "Match"], ["sim", "Simulate"], ["value", "Value bets"], ["ratings", "Ratings"]] as const)
+        {([["board", "Fixtures"], ["match", "Match"], ["sim", "Simulate"], ["value", "Value bets"], ["parlay", "Parlays"], ["ratings", "Ratings"]] as const)
           .map(([k, label]) => (
             <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{label}</button>
           ))}
@@ -64,6 +64,7 @@ export default function Page() {
       {tab === "match" && <MatchTab />}
       {tab === "sim" && <SimTab />}
       {tab === "value" && <ValueTab />}
+      {tab === "parlay" && <ParlayTab />}
       {state && tab === "ratings" && <Ratings state={state} />}
 
       <p className="note" style={{ paddingLeft: 0 }}>
@@ -298,7 +299,7 @@ function ValueTab() {
               {picks.map((p, i) => (
                 <tr key={i}>
                   <td className="team">{p.match}</td>
-                  <td style={{ textTransform: "uppercase" }}>{p.bet}</td>
+                  <td>{p.bet}</td>
                   <td className="num">{p.odds.toFixed(2)}</td>
                   <td className="num">{pct(p.modelProb)}</td>
                   <td className="num">{pct(p.impliedProb)}</td>
@@ -314,6 +315,148 @@ function ValueTab() {
         </div>
       )}
     </section>
+  );
+}
+
+type BuilderPick = {
+  match: string; date?: string;
+  legs: { label: string; odds: number; modelProb: number }[];
+  combinedOdds: number; modelProb: number; fairOdds: number;
+  correlation: number; ev: number; kellyQuarter: number;
+};
+type ParlayPick = {
+  legs: { match: string; label: string; odds: number; modelProb: number }[];
+  combinedOdds: number; modelProb: number; impliedProb: number;
+  ev: number; kellyQuarter: number;
+};
+
+function ParlayTab() {
+  const [minEdge, setMinEdge] = useState(0.05);
+  const [maxLegs, setMaxLegs] = useState(3);
+  const [bankroll, setBankroll] = useState(1000);
+  const [res, setRes] = useState<{ builders: BuilderPick[]; parlays: ParlayPick[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const run = async () => {
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch(`/api/parlay?minEdge=${minEdge}&maxLegs=${maxLegs}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error ?? "request failed");
+      setRes(j);
+    } catch (e: any) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const stake = (kq: number) => `${pct(kq)} · $${(bankroll * kq).toFixed(0)}`;
+
+  return (
+    <>
+      <section className="panel">
+        <div className="head">Bet builders &amp; parlays</div>
+        <div className="controls">
+          <label className="field">Min edge (EV)
+            <input type="number" step={0.01} min={0} max={0.5} value={minEdge}
+              onChange={(e) => setMinEdge(Number(e.target.value))} />
+          </label>
+          <label className="field">Max legs
+            <select value={maxLegs} onChange={(e) => setMaxLegs(Number(e.target.value))}>
+              <option value={2}>2</option><option value={3}>3</option><option value={4}>4</option>
+            </select>
+          </label>
+          <label className="field">Bankroll $
+            <input type="number" min={0} step={100} value={bankroll}
+              onChange={(e) => setBankroll(Number(e.target.value))} />
+          </label>
+          <button className="btn" onClick={run} disabled={busy}>{busy ? "Building…" : "Build combos"}</button>
+        </div>
+        {err && <div className="err">{err}{err.includes("CLOUDBET_API_KEY") && " — add it to .env.local or Vercel → Settings → Environment Variables."}</div>}
+      </section>
+
+      {res && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <div className="head">Bet builders — same-game combos, joint probability from the score grid</div>
+          {res.builders.length === 0 && <div className="note">No same-game combos above the edge threshold.</div>}
+          {res.builders.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table className="board">
+                <thead>
+                  <tr>
+                    <th>Match</th><th>Legs</th>
+                    <th className="num">Combo odds*</th><th className="num">Model</th>
+                    <th className="num">Fair</th><th className="num">Corr</th>
+                    <th className="num">Edge</th><th className="num">Stake ¼K</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {res.builders.map((b, i) => (
+                    <tr key={i}>
+                      <td className="team">{b.match}</td>
+                      <td>{b.legs.map((l, j) => (
+                        <div key={j}>{l.label} <span className="note" style={{ padding: 0 }}>@{l.odds.toFixed(2)}</span></div>
+                      ))}</td>
+                      <td className="num">{b.combinedOdds.toFixed(2)}</td>
+                      <td className="num">{pct(b.modelProb)}</td>
+                      <td className="num">{b.fairOdds.toFixed(2)}</td>
+                      <td className="num">{b.correlation.toFixed(2)}×</td>
+                      <td className="num">+{(100 * b.ev).toFixed(1)}%</td>
+                      <td className="num">{stake(b.kellyQuarter)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="note">
+            * Combo odds = product of single-market prices. A real bet-builder quote can differ — bookmakers
+            reprice correlated legs (Corr &gt; 1 means the legs help each other). Model probability is the exact
+            joint from the score grid, not the naive product. Always compare the actual quote to Fair before betting.
+          </div>
+        </section>
+      )}
+
+      {res && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <div className="head">Parlays — cross-match accumulators, one leg per match</div>
+          {res.parlays.length === 0 && <div className="note">No qualifying legs for parlays right now.</div>}
+          {res.parlays.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table className="board">
+                <thead>
+                  <tr>
+                    <th>Legs</th>
+                    <th className="num">Odds</th><th className="num">Model</th>
+                    <th className="num">Implied</th><th className="num">Edge</th><th className="num">Stake ¼K</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {res.parlays.map((p, i) => (
+                    <tr key={i}>
+                      <td>{p.legs.map((l, j) => (
+                        <div key={j}>
+                          <span className="team">{l.match}</span> — {l.label}{" "}
+                          <span className="note" style={{ padding: 0 }}>@{l.odds.toFixed(2)}</span>
+                        </div>
+                      ))}</td>
+                      <td className="num">{p.combinedOdds.toFixed(2)}</td>
+                      <td className="num">{pct(p.modelProb)}</td>
+                      <td className="num">{pct(p.impliedProb)}</td>
+                      <td className="num">+{(100 * p.ev).toFixed(1)}%</td>
+                      <td className="num">{stake(p.kellyQuarter)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="note">
+            Legs in different matches are independent, so probabilities multiply — but so does the bookmaker&apos;s
+            margin. Parlays amplify both edge and variance; the ¼-Kelly stakes already account for that.
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 
