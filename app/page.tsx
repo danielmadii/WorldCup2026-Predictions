@@ -41,10 +41,13 @@ const KIND_LABEL: Record<Anomaly["kind"], string> = {
 
 const pct = (x: number) => `${(100 * x).toFixed(x < 0.01 ? 2 : 1)}%`;
 const xOdds = (o: number) => (o >= 1000 ? Math.round(o).toLocaleString("en-US") : o.toFixed(2));
-const day = (iso?: string) => {
+const when = (iso?: string) => {
   if (!iso) return "";
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  if (isNaN(d.getTime())) return "";
+  const date = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${date} · ${time}`;
 };
 
 type SortKey = "odds" | "modelProb" | "ev" | "stake" | "toMake";
@@ -252,7 +255,7 @@ export default function Page() {
                 {pool.map((m) =>
                   m.live ? (
                     <span key={m.id} className="pick islive" title="In play — the model only prices matches before kickoff">
-                      <span className="sub">{day(m.date)}</span>
+                      <span className="sub">{when(m.date)}</span>
                       <span>{m.home} vs {m.away}</span>
                       <span className="pill-live">LIVE</span>
                     </span>
@@ -271,7 +274,7 @@ export default function Page() {
                               setSel(next.size === bettable.length ? null : next);
                             }}
                           />
-                          <span className="sub">{day(m.date)}</span>
+                          <span className="sub">{when(m.date)}</span>
                           <span>{m.home} vs {m.away}</span>
                         </label>
                       );
@@ -344,7 +347,7 @@ export default function Page() {
                   <tr key={`${p.match}-${p.bet}`}>
                     <td>
                       <div className="team">{p.match}</div>
-                      {p.date && <div className="sub">{day(p.date)}</div>}
+                      {p.date && <div className="sub">{when(p.date)}</div>}
                     </td>
                     <td>{p.bet}</td>
                     <td className="num">{p.odds.toFixed(2)}</td>
@@ -383,7 +386,7 @@ export default function Page() {
                 <article className="slip" key={i}>
                   <div className="sliphead">
                     <span className="team">{b.match}</span>
-                    {b.date && <time>{day(b.date)}</time>}
+                    {b.date && <time>{when(b.date)}</time>}
                   </div>
                   <ul className="legs">
                     {b.legs.map((l, j) => (
@@ -434,7 +437,7 @@ export default function Page() {
                   {p.legs.map((l, j) => (
                     <li key={j}>
                       <span>
-                        <span className="team">{l.match.replace(" vs ", " – ")}</span>
+                        <span className="team">{l.match.replace(" vs ", " – ")}</span>{l.date && <span className="sub"> {when(l.date)}</span>}
                         <br />{l.label}
                       </span>
                       <span className="lodds">@{l.odds.toFixed(2)}</span>
@@ -477,7 +480,7 @@ export default function Page() {
                     {p.legs.map((l, j) => (
                       <li key={j}>
                         <span>
-                          <span className="team">{l.match.replace(" vs ", " – ")}</span>
+                          <span className="team">{l.match.replace(" vs ", " – ")}</span>{l.date && <span className="sub"> {when(l.date)}</span>}
                           <br />{l.label}
                         </span>
                         <span className="lodds">@{l.odds.toFixed(2)}</span>
@@ -535,7 +538,7 @@ export default function Page() {
                       <td>
                         <span className="team">{a.match}</span>
                         {a.live && <span className="pill-live">LIVE</span>}
-                        {a.date && !a.live && <div className="sub">{day(a.date)}</div>}
+                        {a.date && !a.live && <div className="sub">{when(a.date)}</div>}
                       </td>
                       <td><span className="chip">{KIND_LABEL[a.kind]}</span></td>
                       <td style={{ maxWidth: 420 }}>{a.note}</td>

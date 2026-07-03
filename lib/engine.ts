@@ -167,12 +167,18 @@ export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
       if (!legs.length) continue;
       seen.add(ev.id);
       seenFixture.add(fixture);
+      // trust the clock over the status flag: a future kickoff is never "live",
+      // and once kickoff passes the pre-match betting window is closed either way
+      const cutoff = Date.parse(ev.cutoffTime ?? "");
+      const started = Number.isFinite(cutoff)
+        ? cutoff <= Date.now()
+        : ev.status === "TRADING_LIVE";
       events.push({
         id: ev.id,
         home,
         away,
         date: ev.cutoffTime ?? undefined,
-        live: ev.status === "TRADING_LIVE",
+        live: started,
         legs,
       });
     }
