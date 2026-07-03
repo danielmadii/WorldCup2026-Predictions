@@ -8,9 +8,15 @@ export async function GET() {
   try {
     const events = await fetchWorldCupOdds();
     return NextResponse.json({
-      matches: events
-        .filter((e) => !e.live) // live matches can't go on a slip built in advance
-        .map((e) => ({ id: e.id, home: e.home, away: e.away, date: e.date })),
+      // live matches are listed (so today's games are visible) but flagged —
+      // the model only prices pre-match, so they can't be selected for bets
+      matches: events.map((e) => ({
+        id: e.id,
+        home: e.home,
+        away: e.away,
+        date: e.date,
+        live: !!e.live,
+      })),
     });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });

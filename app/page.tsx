@@ -22,7 +22,16 @@ type Anomaly = {
   kind: "arb" | "contradiction" | "mispriced-pair";
   note: string; edge: number;
 };
-type MatchInfo = { id: number; home: string; away: string; date?: string };
+type MatchInfo = { id: number; home: string; away: string; date?: string; live?: boolean };
+
+// local calendar date (YYYY-MM-DD) — the feed's timestamps are UTC, and a match
+// tonight can be "tomorrow" in UTC; filter in the user's timezone, like the labels
+const localYMD = (iso?: string) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 
 const KIND_LABEL: Record<Anomaly["kind"], string> = {
   arb: "Arbitrage",
@@ -72,7 +81,7 @@ export default function Page() {
   const [toDate, setToDate] = useState("");
 
   const inRange = (m: MatchInfo) => {
-    const d = (m.date ?? "").slice(0, 10);
+    const d = localYMD(m.date);
     const swap = fromDate && toDate && fromDate > toDate;
     const lo = swap ? toDate : fromDate;
     const hi = swap ? fromDate : toDate;
@@ -93,9 +102,10 @@ export default function Page() {
       };
       let ids = "";
       if (matches && (selected || fromDate || toDate)) {
-        const chosen = matches.filter((m) => inRange(m) && (!selected || selected.has(m.id))).map((m) => m.id);
+        const bettable = matches.filter((m) => !m.live);
+        const chosen = bettable.filter((m) => inRange(m) && (!selected || selected.has(m.id))).map((m) => m.id);
         // "-1" forces an empty board rather than silently scanning everything
-        ids = chosen.length === matches.length ? "" : `&ids=${chosen.length ? chosen.join(",") : "-1"}`;
+        ids = chosen.length === bettable.length ? "" : `&ids=${chosen.length ? chosen.join(",") : "-1"}`;
       }
       const [v, c, a, m] = await Promise.all([
         get(`/api/value?minEdge=${edge}${ids}`),
@@ -224,11 +234,12 @@ export default function Page() {
         </dl>
         {matches && matches.length > 0 && (() => {
           const pool = matches.filter(inRange);
-          const nSel = pool.filter((m) => !sel || sel.has(m.id)).length;
+          const bettable = pool.filter((m) => !m.live);
+          const nSel = bettable.filter((m) => !sel || sel.has(m.id)).length;
           return (
             <details className="picker">
               <summary>
-                Matches — {nSel} of {pool.length} selected
+                Matches — {nSel} of {bettable.length} selected
                 {(fromDate || toDate) && <span className="hint">date filter on · {matches.length - pool.length} hidden</span>}
                 {!fromDate && !toDate && <span className="hint">pick the games you want bets on, then Rescan</span>}
               </summary>
@@ -238,25 +249,35 @@ export default function Page() {
               </div>
               {pool.length === 0 && <div className="note">No matches between those dates — widen the range.</div>}
               <div className="pickgrid">
-                {pool.map((m) => {
-                  const on = sel ? sel.has(m.id) : true;
-                  return (
-                    <label key={m.id} className={`pick ${on ? "on" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() => {
-                          const next = new Set(sel ?? pool.map((x) => x.id));
-                          if (on) next.delete(m.id);
-                          else next.add(m.id);
-                          setSel(next.size === pool.length ? null : next);
-                        }}
-                      />
+                {pool.map((m) =>
+                  m.live ? (
+                    <span key={m.id} className="pick islive" title="In play — the model only prices matches before kickoff">
                       <span className="sub">{day(m.date)}</span>
                       <span>{m.home} vs {m.away}</span>
-                    </label>
-                  );
-                })}
+                      <span className="pill-live">LIVE</span>
+                    </span>
+                  ) : (
+                    (() => {
+                      const on = sel ? sel.has(m.id) : true;
+                      return (
+                        <label key={m.id} className={`pick ${on ? "on" : ""}`}>
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => {
+                              const next = new Set(sel ?? bettable.map((x) => x.id));
+                              if (on) next.delete(m.id);
+                              else next.add(m.id);
+                              setSel(next.size === bettable.length ? null : next);
+                            }}
+                          />
+                          <span className="sub">{day(m.date)}</span>
+                          <span>{m.home} vs {m.away}</span>
+                        </label>
+                      );
+                    })()
+                  )
+                )}
               </div>
             </details>
           );

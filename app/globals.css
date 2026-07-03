@@ -216,6 +216,8 @@ table.board td.num, table.board th.num { text-align: right; font-variant-numeric
 .pick:hover { border-color: var(--line-soft); }
 .pick input { accent-color: var(--signal); }
 .pick .sub { min-width: 46px; }
+.pick.islive { cursor: default; opacity: 0.75; }
+.pick.islive:hover { border-color: transparent; }
 
 /* ---- anomalies ---- */
 .pill-live {
