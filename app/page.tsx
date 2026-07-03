@@ -25,6 +25,15 @@ const day = (iso?: string) => {
   return isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 };
 
+type SortKey = "odds" | "modelProb" | "ev" | "stake" | "toMake";
+type ComboSort = "ev" | "modelProb" | "combinedOdds";
+
+const COMBO_SORTS: [ComboSort, string][] = [
+  ["ev", "Best edge"],
+  ["modelProb", "Best win chance"],
+  ["combinedOdds", "Biggest payout"],
+];
+
 function Skeleton({ rows = 4 }: { rows?: number }) {
   return (
     <div className="skeleton" aria-hidden>
@@ -36,6 +45,7 @@ function Skeleton({ rows = 4 }: { rows?: number }) {
 }
 
 export default function Page() {
+  const [tab, setTab] = useState<"value" | "builders" | "parlays">("value");
   const [bankroll, setBankroll] = useState(1000);
   const [minEdge, setMinEdge] = useState(0.03);
   const [value, setValue] = useState<ValuePick[] | null>(null);
@@ -66,9 +76,39 @@ export default function Page() {
   useEffect(() => { scan(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stake = (kq: number) => `$${Math.round(bankroll * kq)}`;
+  const toMake = (kq: number, odds: number) => `$${Math.round(bankroll * kq * odds)}`;
   const maxEv = useMemo(() => Math.max(0.001, ...(value ?? []).map((p) => p.ev)), [value]);
   const needsKey = err.includes("CLOUDBET_API_KEY");
   const loading = busy && !err;
+
+  const [sort, setSort] = useState<{ k: SortKey; d: 1 | -1 }>({ k: "ev", d: -1 });
+  const sortedValue = useMemo(() => {
+    if (!value) return null;
+    const v = (p: ValuePick) =>
+      sort.k === "stake" ? p.kellyQuarter : sort.k === "toMake" ? p.kellyQuarter * p.odds : p[sort.k];
+    return [...value].sort((a, b) => (v(a) - v(b)) * sort.d);
+  }, [value, sort]);
+  const onSort = (k: SortKey) =>
+    setSort((s) => ({ k, d: s.k === k ? (-s.d as 1 | -1) : -1 }));
+
+  const [builderSort, setBuilderSort] = useState<ComboSort>("ev");
+  const [parlaySort, setParlaySort] = useState<ComboSort>("ev");
+  const sortedBuilders = useMemo(
+    () => builders && [...builders].sort((a, b) => b[builderSort] - a[builderSort]),
+    [builders, builderSort]
+  );
+  const sortedParlays = useMemo(
+    () => parlays && [...parlays].sort((a, b) => b[parlaySort] - a[parlaySort]),
+    [parlays, parlaySort]
+  );
+
+  const Th = ({ k, label, left }: { k: SortKey; label: string; left?: boolean }) => (
+    <th className={left ? "" : "num"} aria-sort={sort.k === k ? (sort.d === -1 ? "descending" : "ascending") : undefined}>
+      <button className="sortbtn" onClick={() => onSort(k)}>
+        {label} <span className="arrow">{sort.k === k ? (sort.d === -1 ? "▼" : "▲") : "⇅"}</span>
+      </button>
+    </th>
+  );
 
   return (
     <div className="wrap">
@@ -116,6 +156,10 @@ export default function Page() {
             <dt>Bet</dt>
             <dd>Suggested stake (¼ Kelly of bankroll) — sized so a losing streak can&apos;t sink you.</dd>
           </div>
+          <div>
+            <dt>To make</dt>
+            <dd>What comes back if the bet wins — bet × odds, your stake included.</dd>
+          </div>
         </dl>
       </section>
 
@@ -136,23 +180,39 @@ export default function Page() {
       )}
 
       {!needsKey && <>
-      <section className="panel" style={{ marginTop: 16 }}>
+      <nav className="tabs" aria-label="Sections">
+        {([
+          ["value", "Value bets", value?.length],
+          ["builders", "Bet builders", builders?.length],
+          ["parlays", "Parlays", parlays?.length],
+        ] as const).map(([k, label, n]) => (
+          <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>
+            {label}{n !== undefined && <span className="count">{n}</span>}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "value" && (
+      <section className="panel">
         <div className="head">Value bets <small>single bets where the price beats the model</small></div>
         {loading && !value && <Skeleton rows={5} />}
         {value && value.length === 0 && <div className="note">Nothing above your edge threshold right now — try a lower minimum.</div>}
-        {value && value.length > 0 && (
+        {sortedValue && sortedValue.length > 0 && (
           <div style={{ overflowX: "auto" }}>
             <table className="board">
               <thead>
                 <tr>
                   <th>Match</th><th>Bet</th>
-                  <th className="num">Odds</th><th className="num">Win chance</th>
-                  <th>Edge</th><th className="num">Bet</th>
+                  <Th k="odds" label="Odds" />
+                  <Th k="modelProb" label="Win chance" />
+                  <Th k="ev" label="Edge" left />
+                  <Th k="stake" label="Bet" />
+                  <Th k="toMake" label="To make" />
                 </tr>
               </thead>
               <tbody>
-                {value.map((p, i) => (
-                  <tr key={i}>
+                {sortedValue.map((p, i) => (
+                  <tr key={`${p.match}-${p.bet}`}>
                     <td>
                       <div className="team">{p.match}</div>
                       {p.date && <div className="sub">{day(p.date)}</div>}
@@ -165,6 +225,7 @@ export default function Page() {
                       <div className="meter"><span style={{ width: `${(p.ev / maxEv) * 100}%` }} /></div>
                     </td>
                     <td className="num">{stake(p.kellyQuarter)}</td>
+                    <td className="num">{toMake(p.kellyQuarter, p.odds)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -172,15 +233,24 @@ export default function Page() {
           </div>
         )}
       </section>
+      )}
 
-      <section className="panel" style={{ marginTop: 16 }}>
-        <div className="head">Bet builders <small>combos inside one match — legs rise and fall together</small></div>
+      {tab === "builders" && (
+      <section className="panel">
+        <div className="head">
+          Bet builders <small>combos inside one match — legs rise and fall together</small>
+          {builders && builders.length > 1 && (
+            <select className="mini" value={builderSort} onChange={(e) => setBuilderSort(e.target.value as ComboSort)}>
+              {COMBO_SORTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          )}
+        </div>
         {loading && !builders && <Skeleton rows={3} />}
         {builders && builders.length === 0 && <div className="note">No same-game combos above the edge threshold.</div>}
-        {builders && builders.length > 0 && (
+        {sortedBuilders && sortedBuilders.length > 0 && (
           <>
             <div className="slipgrid">
-              {builders.map((b, i) => (
+              {sortedBuilders.map((b, i) => (
                 <article className="slip" key={i}>
                   <div className="sliphead">
                     <span className="team">{b.match}</span>
@@ -197,6 +267,7 @@ export default function Page() {
                     <div className="stat"><label>Win chance</label><b>{pct(b.modelProb)}</b></div>
                     <div className="stat"><label>Edge</label><b className="chip">+{(100 * b.ev).toFixed(0)}%</b></div>
                     <div className="stat"><label>Bet</label><b>{stake(b.kellyQuarter)}</b></div>
+                    <div className="stat"><label>To make</label><b>{toMake(b.kellyQuarter, b.combinedOdds)}</b></div>
                   </div>
                 </article>
               ))}
@@ -208,14 +279,23 @@ export default function Page() {
           </>
         )}
       </section>
+      )}
 
-      <section className="panel" style={{ marginTop: 16 }}>
-        <div className="head">Parlays <small>combos across matches — all legs must win</small></div>
+      {tab === "parlays" && (
+      <section className="panel">
+        <div className="head">
+          Parlays <small>combos across matches — all legs must win</small>
+          {parlays && parlays.length > 1 && (
+            <select className="mini" value={parlaySort} onChange={(e) => setParlaySort(e.target.value as ComboSort)}>
+              {COMBO_SORTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          )}
+        </div>
         {loading && !parlays && <Skeleton rows={3} />}
         {parlays && parlays.length === 0 && <div className="note">No qualifying legs right now.</div>}
-        {parlays && parlays.length > 0 && (
+        {sortedParlays && sortedParlays.length > 0 && (
           <div className="slipgrid">
-            {parlays.map((p, i) => (
+            {sortedParlays.map((p, i) => (
               <article className="slip" key={i}>
                 <div className="sliphead">
                   <span className="team">{p.legs.length}-leg parlay</span>
@@ -237,12 +317,14 @@ export default function Page() {
                   <div className="stat"><label>Win chance</label><b>{pct(p.modelProb)}</b></div>
                   <div className="stat"><label>Edge</label><b className="chip">+{(100 * p.ev).toFixed(0)}%</b></div>
                   <div className="stat"><label>Bet</label><b>{stake(p.kellyQuarter)}</b></div>
+                  <div className="stat"><label>To make</label><b>{toMake(p.kellyQuarter, p.combinedOdds)}</b></div>
                 </div>
               </article>
             ))}
           </div>
         )}
       </section>
+      )}
       </>}
 
       <p className="note" style={{ paddingLeft: 0 }}>
