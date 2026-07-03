@@ -24,13 +24,14 @@ type Anomaly = {
 };
 type MatchInfo = { id: number; home: string; away: string; date?: string; live?: boolean };
 
-// local calendar date (YYYY-MM-DD) — the feed's timestamps are UTC, and a match
-// tonight can be "tomorrow" in UTC; filter in the user's timezone, like the labels
+// all times come from Cloudbet's cutoffTime (UTC) and render in Beirut time,
+// both for display and for the date-range filter
+const TZ = "Asia/Beirut";
 const localYMD = (iso?: string) => {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return d.toLocaleDateString("en-CA", { timeZone: TZ }); // YYYY-MM-DD
 };
 
 const KIND_LABEL: Record<Anomaly["kind"], string> = {
@@ -45,8 +46,8 @@ const when = (iso?: string) => {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
-  const date = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const date = d.toLocaleDateString("en-US", { timeZone: TZ, month: "short", day: "numeric" });
+  const time = d.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
   return `${date} · ${time}`;
 };
 
@@ -465,7 +466,7 @@ export default function Page() {
         </div>
         {loading && !yolo && <Skeleton rows={3} />}
         {yolo && yolo.length === 0 && (
-          <div className="note">Not enough model-approved matches on the board to build a 1,000× ticket right now.</div>
+          <div className="note">The selected matches can&apos;t multiply to 1,000× even with longshot legs — select more matches or widen the date range.</div>
         )}
         {yolo && yolo.length > 0 && (
           <>

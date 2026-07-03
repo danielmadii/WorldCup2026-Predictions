@@ -232,9 +232,10 @@ export type ParlayPick = {
 };
 
 /**
- * Lottery tickets: parlays whose combined odds reach targetOdds, built from
- * model-approved legs. Maximizing log(p)/log(odds) picks the legs that climb
- * toward the target while giving up the least win probability.
+ * Lottery tickets that always reach targetOdds when the board allows it at all.
+ * Each slot computes the odds it still NEEDS to hit the target with the matches
+ * left, then takes the smartest leg (best log(p)/log(odds)) that clears the bar —
+ * going as longshot as necessary: draws, big handicaps, underdog wins.
  */
 export function buildYoloParlays(
   model: MatchModel,
@@ -242,52 +243,56 @@ export function buildYoloParlays(
   opts: { targetOdds?: number; maxLegs?: number; cap?: number } = {}
 ): ParlayPick[] {
   const { targetOdds = 1000, maxLegs = 16, cap = 6 } = opts;
-  // a ticket can only reach the target within maxLegs if legs average
-  // targetOdds^(1/maxLegs); short favorite legs can never compound there
-  const minLegOdds = Math.pow(targetOdds, 1 / maxLegs) * 0.95;
 
-  const poolFor = (minLegEdge: number) => {
-    type PoolLeg = { match: string; date?: string; label: string; odds: number; p: number; eff: number };
-    // keyed by fixture so a duplicated event can never put two legs on one match
-    const pool = new Map<string, PoolLeg>();
-    for (const e of events) {
-      const match = `${e.home} vs ${e.away}`;
-      const grid = model.scoreGrid(e.home, e.away, true);
-      let best: PoolLeg | null = null;
-      for (const { leg, price } of e.legs) {
-        const ev = evalLeg(grid, leg, price);
-        if (!ev.binary || price < minLegOdds || ev.w <= 0 || ev.w >= 0.97) continue;
-        if (ev.w * price - 1 < minLegEdge) continue;
-        const eff = Math.log(ev.w) / Math.log(price); // -1 is a fair leg; higher is better
-        if (!best || eff > best.eff)
-          best = { match, date: e.date, label: legLabel(leg, e.home, e.away), odds: price, p: ev.w, eff };
-      }
-      const prev = pool.get(match);
-      if (best && (!prev || best.eff > prev.eff)) pool.set(match, best);
+  type C = { match: string; date?: string; label: string; odds: number; p: number; eff: number };
+  // every binary leg per fixture — slot pressure decides how longshot to go
+  const byMatch = new Map<string, C[]>();
+  for (const e of events) {
+    const match = `${e.home} vs ${e.away}`;
+    const grid = model.scoreGrid(e.home, e.away, true);
+    const list: C[] = byMatch.get(match) ?? [];
+    for (const { leg, price } of e.legs) {
+      const ev = evalLeg(grid, leg, price);
+      if (!ev.binary || ev.w <= 0 || ev.w >= 0.97 || price < 1.2) continue;
+      list.push({
+        match,
+        date: e.date,
+        label: legLabel(leg, e.home, e.away),
+        odds: price,
+        p: ev.w,
+        eff: Math.log(ev.w) / Math.log(price), // -1 is a fair price; higher is smarter
+      });
     }
-    return [...pool.values()].sort((x, y) => y.eff - x.eff);
-  };
+    if (list.length) byMatch.set(match, list);
+  }
 
-  // YOLO never comes back empty: prefer +EV legs, relax to near-fair, then to
-  // anything on the board — efficiency ranking still favors the model's picks
-  const canReach = (p: { odds: number }[]) =>
-    p.reduce((s, l) => s + Math.log(l.odds), 0) >= Math.log(targetOdds);
-  let pool = poolFor(0);
-  if (!canReach(pool)) pool = poolFor(-0.05);
-  if (!canReach(pool)) pool = poolFor(-Infinity);
-
-  // disjoint tickets: each takes the best remaining legs until the target is hit
   const out: ParlayPick[] = [];
-  let i = 0;
-  while (out.length < cap && i < pool.length) {
-    const legs: typeof pool = [];
+  const usedGlobal = new Set<string>(); // disjoint tickets across the board
+  while (out.length < cap) {
+    const legs: C[] = [];
+    const usedLocal = new Set<string>();
     let odds = 1;
-    while (i < pool.length && legs.length < maxLegs && odds < targetOdds) {
-      legs.push(pool[i]);
-      odds *= pool[i].odds;
-      i++;
+    while (odds < targetOdds && legs.length < maxLegs) {
+      const remaining = [...byMatch.keys()].filter((m) => !usedGlobal.has(m) && !usedLocal.has(m));
+      if (!remaining.length) break;
+      const slots = Math.min(maxLegs - legs.length, remaining.length);
+      // average odds each remaining slot must carry to still reach the target
+      const need = Math.pow(targetOdds / odds, 1 / slots) * 0.92;
+      let best: C | null = null; // smartest leg long enough for the slot
+      let longest: C | null = null; // fallback when nothing clears the bar
+      for (const m of remaining)
+        for (const c of byMatch.get(m)!) {
+          if (c.odds >= need && (!best || c.eff > best.eff)) best = c;
+          if (!longest || c.odds > longest.odds) longest = c;
+        }
+      const pick = best ?? longest;
+      if (!pick) break;
+      legs.push(pick);
+      usedLocal.add(pick.match);
+      odds *= pick.odds;
     }
-    if (odds < targetOdds) break;
+    if (odds < targetOdds) break; // the board genuinely can't reach the target
+    for (const l of legs) usedGlobal.add(l.match);
     const p = legs.reduce((x, l) => x * l.p, 1);
     out.push({
       legs: legs.map((l) => ({ match: l.match, label: l.label, odds: l.odds, modelProb: l.p, date: l.date })),
