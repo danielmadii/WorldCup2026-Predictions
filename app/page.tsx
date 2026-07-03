@@ -46,7 +46,7 @@ function Skeleton({ rows = 4 }: { rows?: number }) {
 
 export default function Page() {
   const [tab, setTab] = useState<"value" | "builders" | "parlays">("value");
-  const [bankroll, setBankroll] = useState(1000);
+  const [bankroll, setBankroll] = useState(10);
   const [minEdge, setMinEdge] = useState(0.03);
   const [value, setValue] = useState<ValuePick[] | null>(null);
   const [builders, setBuilders] = useState<BuilderPick[] | null>(null);
@@ -75,8 +75,9 @@ export default function Page() {
   };
   useEffect(() => { scan(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const stake = (kq: number) => `$${Math.round(bankroll * kq)}`;
-  const toMake = (kq: number, odds: number) => `$${Math.round(bankroll * kq * odds)}`;
+  const money = (x: number) => `$${x >= 20 ? Math.round(x) : x.toFixed(2)}`;
+  const stake = (kq: number) => money(bankroll * kq);
+  const toMake = (kq: number, odds: number) => money(bankroll * kq * odds);
   const maxEv = useMemo(() => Math.max(0.001, ...(value ?? []).map((p) => p.ev)), [value]);
   const needsKey = err.includes("CLOUDBET_API_KEY");
   const loading = busy && !err;
@@ -123,7 +124,7 @@ export default function Page() {
       <section className="panel">
         <div className="toolbar">
           <label className="field">Bankroll $
-            <input type="number" min={0} step={100} value={bankroll}
+            <input type="number" min={0} step={10} value={bankroll}
               onChange={(e) => setBankroll(Number(e.target.value))} />
           </label>
           <label className="field">Min edge
