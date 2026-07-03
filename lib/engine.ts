@@ -17,16 +17,19 @@ export async function getModel(force = false) {
 const CB = "https://sports-api.cloudbet.com/pub";
 
 // goal-based markets the score grid can price exactly; corners/bookings markets
-// exist on Cloudbet but the model has no corners/cards data, so they are excluded
-const FEED_MARKETS = [
-  "soccer.match_odds",
-  "soccer.total_goals",
-  "soccer.both_teams_to_score",
-  "soccer.double_chance",
-  "soccer.draw_no_bet",
-  "soccer.team_total_goals",
-  "soccer.asian_handicap",
-];
+// exist on Cloudbet but the model has no corners/cards data, so they are excluded.
+// Both spellings are requested and parsed — docs show camelCase in query samples
+// while the canonical markets list is snake_case.
+const MK = {
+  matchOdds: ["soccer.match_odds", "soccer.matchOdds"],
+  totals: ["soccer.total_goals", "soccer.totalGoals"],
+  btts: ["soccer.both_teams_to_score", "soccer.bothTeamsToScore"],
+  doubleChance: ["soccer.double_chance", "soccer.doubleChance"],
+  dnb: ["soccer.draw_no_bet", "soccer.drawNoBet"],
+  teamTotals: ["soccer.team_total_goals", "soccer.teamTotalGoals"],
+  ah: ["soccer.asian_handicap", "soccer.asianHandicap"],
+};
+const MARKETS_QS = Object.values(MK).flat().map((m) => `markets=${m}`).join("&");
 
 async function cb(path: string): Promise<any> {
   const key = process.env.CLOUDBET_API_KEY;
@@ -60,43 +63,44 @@ const DC_OUTCOMES: Record<string, "home_or_draw" | "home_or_away" | "draw_or_awa
 
 function parseLegs(markets: any): OddsLeg[] {
   const found: OddsLeg[] = [];
-  const scan = (key: string, toLeg: (outcome: string, params: string) => Leg | null) => {
-    for (const [subKey, sub] of Object.entries<any>(markets?.[key]?.submarkets ?? {}))
-      for (const sel of sub.selections ?? []) {
-        if (sel.status === "SELECTION_DISABLED" || sel.side === "LAY") continue;
-        const price = Number(sel.price);
-        const leg = toLeg(String(sel.outcome ?? ""), String(sel.params || subKey || ""));
-        if (leg && Number.isFinite(price) && price > 1) found.push({ leg, price });
-      }
+  const scan = (keys: string[], toLeg: (outcome: string, params: string) => Leg | null) => {
+    for (const key of keys)
+      for (const [subKey, sub] of Object.entries<any>(markets?.[key]?.submarkets ?? {}))
+        for (const sel of sub.selections ?? []) {
+          if (sel.status === "SELECTION_DISABLED" || sel.side === "LAY") continue;
+          const price = Number(sel.price);
+          const leg = toLeg(String(sel.outcome ?? ""), String(sel.params || subKey || ""));
+          if (leg && Number.isFinite(price) && price > 1) found.push({ leg, price });
+        }
   };
   // pushes and quarter lines are settled exactly by the combo engine
   const validLine = (line: number) => Number.isFinite(line) && Math.round(line * 4) === line * 4;
-  scan("soccer.match_odds", (o) =>
+  scan(MK.matchOdds, (o) =>
     o === "home" || o === "draw" || o === "away" ? { market: "1x2", pick: o } : null
   );
-  scan("soccer.total_goals", (o, params) => {
+  scan(MK.totals, (o, params) => {
     const line = Number(new URLSearchParams(params).get("total"));
     if (!validLine(line) || line <= 0) return null;
     return o === "over" || o === "under" ? { market: "total", pick: o, line } : null;
   });
-  scan("soccer.team_total_goals", (o, params) => {
+  scan(MK.teamTotals, (o, params) => {
     const sp = new URLSearchParams(params);
     const line = Number(sp.get("total"));
     const team = sp.get("team");
     if (!validLine(line) || line <= 0 || (team !== "home" && team !== "away")) return null;
     return o === "over" || o === "under" ? { market: "team_total", team, pick: o, line } : null;
   });
-  scan("soccer.both_teams_to_score", (o) =>
+  scan(MK.btts, (o) =>
     o === "yes" || o === "no" ? { market: "btts", pick: o } : null
   );
-  scan("soccer.double_chance", (o) => {
+  scan(MK.doubleChance, (o) => {
     const pick = DC_OUTCOMES[o];
     return pick ? { market: "double_chance", pick } : null;
   });
-  scan("soccer.draw_no_bet", (o) =>
+  scan(MK.dnb, (o) =>
     o === "home" || o === "away" ? { market: "dnb", pick: o } : null
   );
-  scan("soccer.asian_handicap", (o, params) => {
+  scan(MK.ah, (o, params) => {
     const hcp = Number(new URLSearchParams(params).get("handicap"));
     if (!validLine(hcp)) return null;
     // the submarket line is the home handicap; the away side gets its negation
@@ -117,28 +121,47 @@ function parseLegs(markets: any): OddsLeg[] {
 let oddsCache: { at: number; events: EventOdds[] } | null = null;
 const ODDS_TTL_MS = 20_000; // several endpoints scan per page load; don't hammer Cloudbet
 
-/** Bulk ingestion: one request returns all events with the requested markets. */
+/** Active men's World Cup competitions — skips women's, qualifiers, outrights,
+ *  and anything Cloudbet marks inactive (eventCount 0). */
+async function worldCupCompetitions(): Promise<{ key: string; eventCount: number }[]> {
+  const sport = await cb("/v2/odds/sports/soccer");
+  const found: { key: string; eventCount: number }[] = [];
+  for (const cat of sport.categories ?? [])
+    for (const comp of cat.competitions ?? []) {
+      const k = String(comp.key ?? "").toLowerCase();
+      if (!k.includes("world-cup")) continue;
+      if (/women|qualif|outright|special|u17|u20|u21|u23|futsal|beach|club/.test(k)) continue;
+      found.push({ key: comp.key, eventCount: Number(comp.eventCount ?? 0) });
+    }
+  return found.sort((a, b) => b.eventCount - a.eventCount);
+}
+
+/** Bulk ingestion: one request per competition returns all events with markets. */
 export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
   if (oddsCache && Date.now() - oddsCache.at < ODDS_TTL_MS) return oddsCache.events;
-  const sport = await cb("/v2/odds/sports/soccer");
-  let compKey: string | null = null;
-  for (const cat of sport.categories ?? [])
-    for (const comp of cat.competitions ?? [])
-      if (comp.key.includes("world-cup") && !comp.key.includes("women"))
-        compKey = comp.key;
-  if (!compKey) throw new Error("World Cup competition not found on Cloudbet");
+  const comps = await worldCupCompetitions();
+  const active = comps.filter((c) => c.eventCount > 0);
+  if (!active.length)
+    throw new Error(
+      comps.length
+        ? `World Cup competitions exist on Cloudbet but none are active right now: ${comps.map((c) => c.key).join(", ")}`
+        : "World Cup competition not found on Cloudbet"
+    );
 
-  const qs = FEED_MARKETS.map((m) => `markets=${m}`).join("&");
-  const comp = await cb(`/v2/odds/competitions/${compKey}?${qs}`);
   const events: EventOdds[] = [];
-  for (const ev of comp.events ?? []) {
-    // pre-match feeds the model; live events are scanned for pricing anomalies only
-    if (ev.status !== "TRADING" && ev.status !== "TRADING_LIVE") continue;
-    const home = norm(ev.home?.name ?? "");
-    const away = norm(ev.away?.name ?? "");
-    if (!home || !away) continue;
-    const legs = parseLegs(ev.markets);
-    if (legs.length)
+  const seen = new Set<number>();
+  for (const c of active) {
+    const comp = await cb(`/v2/odds/competitions/${c.key}?${MARKETS_QS}`);
+    for (const ev of comp.events ?? []) {
+      // pre-match feeds the model; live events are scanned for pricing anomalies only
+      if (ev.status !== "TRADING" && ev.status !== "TRADING_LIVE") continue;
+      if (seen.has(ev.id)) continue;
+      const home = norm(ev.home?.name ?? "");
+      const away = norm(ev.away?.name ?? "");
+      if (!home || !away) continue;
+      const legs = parseLegs(ev.markets);
+      if (!legs.length) continue;
+      seen.add(ev.id);
       events.push({
         id: ev.id,
         home,
@@ -147,10 +170,39 @@ export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
         live: ev.status === "TRADING_LIVE",
         legs,
       });
+    }
   }
   events.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
   oddsCache = { at: Date.now(), events };
   return events;
+}
+
+/** Raw diagnostics for /api/debug — shows what Cloudbet actually returns. */
+export async function debugWorldCup() {
+  const comps = await worldCupCompetitions();
+  const fetched: any[] = [];
+  for (const c of comps.filter((x) => x.eventCount > 0).slice(0, 3)) {
+    const comp = await cb(`/v2/odds/competitions/${c.key}?${MARKETS_QS}`);
+    const evs: any[] = comp.events ?? [];
+    const statuses: Record<string, number> = {};
+    for (const ev of evs) statuses[ev.status] = (statuses[ev.status] ?? 0) + 1;
+    const sample = evs.find((ev: any) => ev.markets && Object.keys(ev.markets).length) ?? evs[0];
+    fetched.push({
+      key: c.key,
+      eventsReturned: evs.length,
+      statuses,
+      sampleEvent: sample
+        ? {
+            id: sample.id,
+            name: `${sample.home?.name} vs ${sample.away?.name}`,
+            status: sample.status,
+            marketKeys: Object.keys(sample.markets ?? {}),
+            parsedLegs: parseLegs(sample.markets).length,
+          }
+        : null,
+    });
+  }
+  return { competitions: comps, fetched, parsedEvents: (await fetchWorldCupOdds()).length };
 }
 
 export type ValuePick = {

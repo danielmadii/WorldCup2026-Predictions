@@ -269,7 +269,13 @@ export default function Page() {
       <section className="panel">
         <div className="head">Value bets <small>single bets where the price beats the model</small></div>
         {loading && !value && <Skeleton rows={5} />}
-        {value && value.length === 0 && <div className="note">Nothing above your edge threshold right now — try a lower minimum.</div>}
+        {value && value.length === 0 && (
+          <div className="note">
+            {matches && matches.length === 0
+              ? <>Cloudbet returned no upcoming World Cup matches — open <code>/api/debug</code> to see what the feed contains.</>
+              : "Nothing above your edge threshold right now — try a lower minimum."}
+          </div>
+        )}
         {sortedValue && sortedValue.length > 0 && (
           <div style={{ overflowX: "auto" }}>
             <table className="board">
