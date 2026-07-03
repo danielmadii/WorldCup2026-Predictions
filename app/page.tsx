@@ -408,6 +408,8 @@ export default function Page() {
             <div className="note">
               Odds here multiply the single prices. Cloudbet&apos;s real bet-builder quote reprices
               linked legs — build the slip on their site and only bet if their quote is at or above <b>Fair</b>.
+              Corners and cards legs are priced from the market itself (margin removed): they add variety,
+              not edge — any edge shown comes from the goal legs.
             </div>
           </>
         )}
@@ -567,9 +569,10 @@ export default function Page() {
       </>}
 
       <p className="note" style={{ paddingLeft: 0 }}>
-        Goal markets only — corners and cards trade on Cloudbet, but the model has no corners or
-        cards data, so it won&apos;t pretend to price them. Edges are model estimates, not guarantees.
-        Never bet more than you can afford to lose.
+        The model predicts goals — corners and cards appear in bet builders priced from Cloudbet&apos;s
+        own market with the margin removed, so no fake edge is ever claimed on them; they stay out of
+        value bets and parlays. Edges are model estimates, not guarantees. Never bet more than you can
+        afford to lose.
       </p>
     </div>
   );

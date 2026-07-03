@@ -1,6 +1,6 @@
 import { loadMatches, type Match } from "./data";
 import { MatchModel } from "./model";
-import { evalLeg, legLabel, kellyPush, type Leg, type OddsLeg, type EventOdds } from "./combo";
+import { evalLeg, legLabel, kellyPush, type Leg, type OddsLeg, type EventOdds, type ExtraLeg } from "./combo";
 
 let trained: { at: number; model: MatchModel; matches: Match[] } | null = null;
 const TTL_MS = 60 * 60 * 1000;
@@ -28,6 +28,15 @@ const MK = {
   dnb: ["soccer.draw_no_bet", "soccer.drawNoBet"],
   teamTotals: ["soccer.team_total_goals", "soccer.teamTotalGoals"],
   ah: ["soccer.asian_handicap", "soccer.asianHandicap"],
+  cleanSheet: ["soccer.team_clean_sheet", "soccer.teamCleanSheet"],
+  winToNil: ["soccer.team_win_to_nil", "soccer.teamWinToNil"],
+  // corners/cards: the goals model can't price these — they enter bet builders
+  // with market-fair probabilities (bookmaker margin removed), no edge claimed
+  cornersTotal: ["soccer.total_corners", "soccer.totalCorners"],
+  cornerHandicap: ["soccer.corner_handicap", "soccer.cornerHandicap"],
+  corner1x2: ["soccer.corner_match_odds", "soccer.cornerMatchOdds"],
+  bookings: ["soccer.total_bookings", "soccer.totalBookings"],
+  bookingPoints: ["soccer.total_booking_points", "soccer.totalBookingPoints"],
 };
 const MARKETS_QS = Object.values(MK).flat().map((m) => `markets=${m}`).join("&");
 
@@ -108,6 +117,16 @@ function parseLegs(markets: any): OddsLeg[] {
     if (o === "away") return { market: "ah", pick: "away", line: -hcp };
     return null;
   });
+  scan(MK.cleanSheet, (o, params) => {
+    const team = new URLSearchParams(params).get("team");
+    if (team !== "home" && team !== "away") return null;
+    return o === "yes" || o === "no" ? { market: "clean_sheet", team, pick: o } : null;
+  });
+  scan(MK.winToNil, (o, params) => {
+    const team = new URLSearchParams(params).get("team");
+    if (team !== "home" && team !== "away") return null;
+    return o === "yes" || o === "no" ? { market: "win_to_nil", team, pick: o } : null;
+  });
   // the same selection can appear in several submarkets; keep the best price
   const best = new Map<string, OddsLeg>();
   for (const l of found) {
@@ -116,6 +135,96 @@ function parseLegs(markets: any): OddsLeg[] {
     if (!prev || l.price > prev.price) best.set(k, l);
   }
   return [...best.values()];
+}
+
+/** Corners/cards legs for bet builders: probability = the market's own price
+ *  with the margin stripped (de-vig), so no fake model edge is ever claimed. */
+function parseExtras(markets: any, home: string, away: string): ExtraLeg[] {
+  const out: ExtraLeg[] = [];
+  type Sel = { outcome: string; price: number; params: string };
+  const collect = (keys: string[]): Sel[] => {
+    const sels: Sel[] = [];
+    for (const key of keys)
+      for (const [subKey, sub] of Object.entries<any>(markets?.[key]?.submarkets ?? {}))
+        for (const sel of sub.selections ?? []) {
+          if (sel.status === "SELECTION_DISABLED" || sel.side === "LAY") continue;
+          const price = Number(sel.price);
+          if (Number.isFinite(price) && price > 1)
+            sels.push({
+              outcome: String(sel.outcome ?? ""),
+              price,
+              params: String(sel.params || subKey || ""),
+            });
+        }
+    return sels;
+  };
+  const best = (sels: Sel[], keyOf: (s: Sel) => string | null) => {
+    const m = new Map<string, Sel>();
+    for (const s of sels) {
+      const k = keyOf(s);
+      if (!k) continue;
+      const prev = m.get(k);
+      if (!prev || s.price > prev.price) m.set(k, s);
+    }
+    return m;
+  };
+
+  // over/under pairs at .5 lines (win-or-lose only)
+  const ou = (keys: string[], group: string, unit: string) => {
+    const byKey = best(collect(keys), (s) => {
+      const line = Number(new URLSearchParams(s.params).get("total"));
+      if (!Number.isFinite(line) || Math.abs(line % 1) !== 0.5) return null;
+      return s.outcome === "over" || s.outcome === "under" ? `${s.outcome}|${line}` : null;
+    });
+    for (const k of byKey.keys()) {
+      if (!k.startsWith("over|")) continue;
+      const line = k.slice(5);
+      const over = byKey.get(k);
+      const under = byKey.get(`under|${line}`);
+      if (!over || !under) continue;
+      const io = 1 / over.price, iu = 1 / under.price;
+      out.push({ group, label: `Over ${line} ${unit}`, price: over.price, fairP: io / (io + iu) });
+      out.push({ group, label: `Under ${line} ${unit}`, price: under.price, fairP: iu / (io + iu) });
+    }
+  };
+  ou(MK.cornersTotal, "corners_total", "corners");
+  ou(MK.bookings, "bookings", "booking pts (1 per yellow, 2 per red)");
+  ou(MK.bookingPoints, "booking_points", "booking points (10 yellow / 25 red)");
+
+  // corner handicap: two-way at .5 lines; away side gets the negated line
+  {
+    const byKey = best(collect(MK.cornerHandicap), (s) => {
+      const h = Number(new URLSearchParams(s.params).get("handicap"));
+      if (!Number.isFinite(h) || Math.abs(h % 1) !== 0.5) return null;
+      return s.outcome === "home" || s.outcome === "away" ? `${s.outcome}|${h}` : null;
+    });
+    for (const k of byKey.keys()) {
+      if (!k.startsWith("home|")) continue;
+      const line = Number(k.slice(5));
+      const h = byKey.get(k);
+      const a = byKey.get(`away|${line}`);
+      if (!h || !a) continue;
+      const ih = 1 / h.price, ia = 1 / a.price;
+      const fmt = (x: number) => (x > 0 ? `+${x}` : `${x}`);
+      out.push({ group: "corner_hcp", label: `${home} ${fmt(line)} corners`, price: h.price, fairP: ih / (ih + ia) });
+      out.push({ group: "corner_hcp", label: `${away} ${fmt(-line)} corners`, price: a.price, fairP: ia / (ih + ia) });
+    }
+  }
+
+  // most corners: three-way de-vig
+  {
+    const byKey = best(collect(MK.corner1x2), (s) =>
+      s.outcome === "home" || s.outcome === "draw" || s.outcome === "away" ? s.outcome : null
+    );
+    const h = byKey.get("home"), d = byKey.get("draw"), a = byKey.get("away");
+    if (h && d && a) {
+      const s = 1 / h.price + 1 / d.price + 1 / a.price;
+      out.push({ group: "corner_1x2", label: `${home} most corners`, price: h.price, fairP: 1 / h.price / s });
+      out.push({ group: "corner_1x2", label: "Most corners: draw", price: d.price, fairP: 1 / d.price / s });
+      out.push({ group: "corner_1x2", label: `${away} most corners`, price: a.price, fairP: 1 / a.price / s });
+    }
+  }
+  return out;
 }
 
 let oddsCache: { at: number; events: EventOdds[] } | null = null;
@@ -136,9 +245,20 @@ async function worldCupCompetitions(): Promise<{ key: string; eventCount: number
   return found.sort((a, b) => b.eventCount - a.eventCount);
 }
 
-/** Bulk ingestion: one request per competition returns all events with markets. */
-export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
-  if (oddsCache && Date.now() - oddsCache.at < ODDS_TTL_MS) return oddsCache.events;
+type RawCand = {
+  id: number;
+  home: string;
+  away: string;
+  comp: string;
+  date?: string;
+  cutoffMs: number;
+  statusLive: boolean;
+  legs: OddsLeg[];
+  extras: ExtraLeg[];
+};
+
+/** Every valid event from every active competition, grouped by fixture (teams). */
+async function collectCandidates() {
   const comps = await worldCupCompetitions();
   const active = comps.filter((c) => c.eventCount > 0);
   if (!active.length)
@@ -147,73 +267,100 @@ export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
         ? `World Cup competitions exist on Cloudbet but none are active right now: ${comps.map((c) => c.key).join(", ")}`
         : "World Cup competition not found on Cloudbet"
     );
-
-  const events: EventOdds[] = [];
-  const seen = new Set<number>();
-  const seenFixture = new Set<string>();
+  const byFixture = new Map<string, RawCand[]>();
+  const seenIds = new Set<number>();
   for (const c of active) {
     const comp = await cb(`/v2/odds/competitions/${c.key}?${MARKETS_QS}`);
     for (const ev of comp.events ?? []) {
       // pre-match feeds the model; live events are scanned for pricing anomalies only
       if (ev.status !== "TRADING" && ev.status !== "TRADING_LIVE") continue;
+      if (seenIds.has(ev.id)) continue;
       const home = norm(ev.home?.name ?? "");
       const away = norm(ev.away?.name ?? "");
       if (!home || !away) continue;
-      // the same fixture can be listed under several competitions with different
-      // event ids — a duplicate would let parlays stack two outcomes on one match
-      const fixture = `${home}|${away}|${String(ev.cutoffTime ?? "").slice(0, 10)}`;
-      if (seen.has(ev.id) || seenFixture.has(fixture)) continue;
       const legs = parseLegs(ev.markets);
       if (!legs.length) continue;
-      seen.add(ev.id);
-      seenFixture.add(fixture);
-      // trust the clock over the status flag: a future kickoff is never "live",
-      // and once kickoff passes the pre-match betting window is closed either way
-      const cutoff = Date.parse(ev.cutoffTime ?? "");
-      const started = Number.isFinite(cutoff)
-        ? cutoff <= Date.now()
-        : ev.status === "TRADING_LIVE";
-      events.push({
+      seenIds.add(ev.id);
+      const cutoffMs = Date.parse(ev.cutoffTime ?? "");
+      const cand: RawCand = {
         id: ev.id,
         home,
         away,
+        comp: c.key,
         date: ev.cutoffTime ?? undefined,
-        live: started,
+        cutoffMs: Number.isFinite(cutoffMs) ? cutoffMs : 0,
+        statusLive: ev.status === "TRADING_LIVE",
         legs,
-      });
+        extras: parseExtras(ev.markets, home, away),
+      };
+      const k = `${home}|${away}`;
+      const list = byFixture.get(k) ?? [];
+      list.push(cand);
+      byFixture.set(k, list);
     }
+  }
+  return { comps, byFixture };
+}
+
+/** The same fixture can be listed several times across competitions, including
+ *  ghost entries with placeholder cutoff times. The real listing is the one with
+ *  a future kickoff (ghosts carry stale times), then the richest markets, then
+ *  the latest cutoff. */
+function pickListing(list: RawCand[]): RawCand {
+  const now = Date.now();
+  return [...list].sort((a, b) => {
+    const fa = a.cutoffMs > now ? 1 : 0;
+    const fb = b.cutoffMs > now ? 1 : 0;
+    if (fa !== fb) return fb - fa;
+    if (a.legs.length !== b.legs.length) return b.legs.length - a.legs.length;
+    return b.cutoffMs - a.cutoffMs;
+  })[0];
+}
+
+/** Bulk ingestion: one request per competition returns all events with markets. */
+export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
+  if (oddsCache && Date.now() - oddsCache.at < ODDS_TTL_MS) return oddsCache.events;
+  const { byFixture } = await collectCandidates();
+  const events: EventOdds[] = [];
+  for (const list of byFixture.values()) {
+    const c = pickListing(list);
+    // trust the clock over the status flag: a future kickoff is never "live",
+    // and once kickoff passes the pre-match betting window is closed either way
+    const started = c.cutoffMs ? c.cutoffMs <= Date.now() : c.statusLive;
+    events.push({
+      id: c.id,
+      home: c.home,
+      away: c.away,
+      date: c.date,
+      live: started,
+      legs: c.legs,
+      extras: c.extras,
+    });
   }
   events.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
   oddsCache = { at: Date.now(), events };
   return events;
 }
 
-/** Raw diagnostics for /api/debug — shows what Cloudbet actually returns. */
+/** Raw diagnostics for /api/debug — shows what Cloudbet actually returns,
+ *  including every duplicate listing per fixture and which one was chosen. */
 export async function debugWorldCup() {
-  const comps = await worldCupCompetitions();
-  const fetched: any[] = [];
-  for (const c of comps.filter((x) => x.eventCount > 0).slice(0, 3)) {
-    const comp = await cb(`/v2/odds/competitions/${c.key}?${MARKETS_QS}`);
-    const evs: any[] = comp.events ?? [];
-    const statuses: Record<string, number> = {};
-    for (const ev of evs) statuses[ev.status] = (statuses[ev.status] ?? 0) + 1;
-    const sample = evs.find((ev: any) => ev.markets && Object.keys(ev.markets).length) ?? evs[0];
-    fetched.push({
-      key: c.key,
-      eventsReturned: evs.length,
-      statuses,
-      sampleEvent: sample
-        ? {
-            id: sample.id,
-            name: `${sample.home?.name} vs ${sample.away?.name}`,
-            status: sample.status,
-            marketKeys: Object.keys(sample.markets ?? {}),
-            parsedLegs: parseLegs(sample.markets).length,
-          }
-        : null,
-    });
-  }
-  return { competitions: comps, fetched, parsedEvents: (await fetchWorldCupOdds()).length };
+  const { comps, byFixture } = await collectCandidates();
+  const fixtures = [...byFixture.entries()].map(([k, list]) => {
+    const chosen = pickListing(list);
+    return {
+      match: k.replace("|", " vs "),
+      chosen: { comp: chosen.comp, id: chosen.id, cutoffTime: chosen.date, legs: chosen.legs.length, extras: chosen.extras.length },
+      listings: list.map((c) => ({
+        comp: c.comp,
+        id: c.id,
+        cutoffTime: c.date,
+        status: c.statusLive ? "TRADING_LIVE" : "TRADING",
+        legs: c.legs.length,
+      })),
+    };
+  });
+  return { competitions: comps, fixtures, parsedEvents: fixtures.length };
 }
 
 export type ValuePick = {

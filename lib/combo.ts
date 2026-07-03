@@ -7,9 +7,16 @@ export type Leg =
   | { market: "total"; pick: "over" | "under"; line: number }
   | { market: "team_total"; team: "home" | "away"; pick: "over" | "under"; line: number }
   | { market: "btts"; pick: "yes" | "no" }
-  | { market: "ah"; pick: "home" | "away"; line: number }; // line applies to the picked side
+  | { market: "ah"; pick: "home" | "away"; line: number } // line applies to the picked side
+  | { market: "clean_sheet"; team: "home" | "away"; pick: "yes" | "no" }
+  | { market: "win_to_nil"; team: "home" | "away"; pick: "yes" | "no" };
 
 export type OddsLeg = { leg: Leg; price: number };
+
+/** Markets the goals model can't price (corners, cards): probability comes from
+ *  the market itself with the bookmaker margin removed — no model edge claimed. */
+export type ExtraLeg = { group: string; label: string; price: number; fairP: number };
+
 export type EventOdds = {
   id: number;
   home: string;
@@ -17,6 +24,7 @@ export type EventOdds = {
   date?: string;
   live?: boolean;
   legs: OddsLeg[];
+  extras?: ExtraLeg[];
 };
 
 export function kelly(p: number, odds: number): number {
@@ -75,6 +83,14 @@ function settle(leg: Leg, h: number, a: number): Settled {
       return settleOU(leg.team === "home" ? h : a, leg.line, leg.pick === "over");
     case "ah":
       return settleHandicap(leg.pick === "home" ? h - a : a - h, leg.line);
+    case "clean_sheet": {
+      const conceded = leg.team === "home" ? a : h;
+      return (leg.pick === "yes" ? conceded === 0 : conceded > 0) ? "win" : "loss";
+    }
+    case "win_to_nil": {
+      const wtn = leg.team === "home" ? h > a && a === 0 : a > h && h === 0;
+      return (leg.pick === "yes" ? wtn : !wtn) ? "win" : "loss";
+    }
   }
 }
 
@@ -133,6 +149,10 @@ export function legLabel(leg: Leg, home: string, away: string): string {
       return `Both teams to score: ${leg.pick}`;
     case "ah":
       return `${leg.pick === "home" ? home : away} ${fmtLine(leg.line)} (Asian)`;
+    case "clean_sheet":
+      return `${leg.team === "home" ? home : away} clean sheet: ${leg.pick}`;
+    case "win_to_nil":
+      return `${leg.team === "home" ? home : away} to win to nil${leg.pick === "no" ? ": no" : ""}`;
   }
 }
 
@@ -176,38 +196,49 @@ export function buildBetBuilders(
   for (const e of events) {
     const grid = model.scoreGrid(e.home, e.away, true);
     // combos need win-or-lose legs only: pushes would void a leg, not the ticket
-    const cands = e.legs
-      .map((l) => ({ ...l, ...evalLeg(grid, l.leg, l.price) }))
+    type Cand = { label: string; price: number; p: number; mkey: string; leg?: Leg };
+    const gridCands: Cand[] = e.legs
+      .map(({ leg, price }) => ({ leg, price, ...evalLeg(grid, leg, price) }))
       .filter((l) => l.binary && l.w >= 0.15 && l.w <= 0.92)
-      .sort((x, y) => y.w * y.price - x.w * x.price)
-      .slice(0, 14);
+      .map((l) => ({
+        label: legLabel(l.leg, e.home, e.away),
+        price: l.price,
+        p: l.w,
+        mkey: l.leg.market,
+        leg: l.leg,
+      }));
+    // corners/cards: market-fair probability, independent of the score grid
+    const extraCands: Cand[] = (e.extras ?? [])
+      .filter((x) => x.fairP >= 0.15 && x.fairP <= 0.92)
+      .map((x) => ({ label: x.label, price: x.price, p: x.fairP, mkey: x.group }));
+    const cands = [...gridCands, ...extraCands]
+      .sort((x, y) => y.p * y.price - x.p * x.price)
+      .slice(0, 16);
     const matchPicks: BuilderPick[] = [];
     for (let k = 2; k <= maxLegs; k++)
       for (const idxs of combosOf(cands.length, k)) {
         const legs = idxs.map((i) => cands[i]);
-        if (new Set(legs.map((l) => l.leg.market)).size < legs.length) continue;
-        const joint = jointProb(grid, legs.map((l) => l.leg));
+        if (new Set(legs.map((l) => l.mkey)).size < legs.length) continue;
+        const gl = legs.filter((l) => l.leg).map((l) => l.leg!);
+        const gridJoint = gl.length ? jointProb(grid, gl) : 1;
+        const joint = legs.filter((l) => !l.leg).reduce((x, l) => x * l.p, gridJoint);
         if (joint < 0.03) continue;
-        // every leg must constrain the combo given the others — a (nearly) implied leg
-        // inflates the price product with edge no bookmaker would actually quote
+        // every grid leg must constrain the combo given the others — a (nearly)
+        // implied leg inflates the price product with edge no bookmaker would quote
         let redundant = false;
-        for (let i = 0; i < legs.length && !redundant; i++) {
-          const rest = legs.filter((_, j) => j !== i).map((l) => l.leg);
-          if (joint > 0.98 * jointProb(grid, rest)) redundant = true;
+        for (let i = 0; i < gl.length && !redundant; i++) {
+          const rest = gl.filter((_, j) => j !== i);
+          if (gridJoint > 0.98 * jointProb(grid, rest)) redundant = true;
         }
         if (redundant) continue;
         const combinedOdds = legs.reduce((x, l) => x * l.price, 1);
-        const naiveProb = legs.reduce((x, l) => x * l.w, 1);
+        const naiveProb = legs.reduce((x, l) => x * l.p, 1);
         const edge = joint * combinedOdds - 1;
         if (edge < minEdge) continue;
         matchPicks.push({
           match: `${e.home} vs ${e.away}`,
           date: e.date,
-          legs: legs.map((l) => ({
-            label: legLabel(l.leg, e.home, e.away),
-            odds: l.price,
-            modelProb: l.w,
-          })),
+          legs: legs.map((l) => ({ label: l.label, odds: l.price, modelProb: l.p })),
           combinedOdds,
           modelProb: joint,
           fairOdds: 1 / joint,
