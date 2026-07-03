@@ -150,18 +150,23 @@ export async function fetchWorldCupOdds(): Promise<EventOdds[]> {
 
   const events: EventOdds[] = [];
   const seen = new Set<number>();
+  const seenFixture = new Set<string>();
   for (const c of active) {
     const comp = await cb(`/v2/odds/competitions/${c.key}?${MARKETS_QS}`);
     for (const ev of comp.events ?? []) {
       // pre-match feeds the model; live events are scanned for pricing anomalies only
       if (ev.status !== "TRADING" && ev.status !== "TRADING_LIVE") continue;
-      if (seen.has(ev.id)) continue;
       const home = norm(ev.home?.name ?? "");
       const away = norm(ev.away?.name ?? "");
       if (!home || !away) continue;
+      // the same fixture can be listed under several competitions with different
+      // event ids — a duplicate would let parlays stack two outcomes on one match
+      const fixture = `${home}|${away}|${String(ev.cutoffTime ?? "").slice(0, 10)}`;
+      if (seen.has(ev.id) || seenFixture.has(fixture)) continue;
       const legs = parseLegs(ev.markets);
       if (!legs.length) continue;
       seen.add(ev.id);
+      seenFixture.add(fixture);
       events.push({
         id: ev.id,
         home,

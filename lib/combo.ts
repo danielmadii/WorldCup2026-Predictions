@@ -248,8 +248,10 @@ export function buildYoloParlays(
 
   const poolFor = (minLegEdge: number) => {
     type PoolLeg = { match: string; date?: string; label: string; odds: number; p: number; eff: number };
-    const pool: PoolLeg[] = [];
+    // keyed by fixture so a duplicated event can never put two legs on one match
+    const pool = new Map<string, PoolLeg>();
     for (const e of events) {
+      const match = `${e.home} vs ${e.away}`;
       const grid = model.scoreGrid(e.home, e.away, true);
       let best: PoolLeg | null = null;
       for (const { leg, price } of e.legs) {
@@ -258,18 +260,12 @@ export function buildYoloParlays(
         if (ev.w * price - 1 < minLegEdge) continue;
         const eff = Math.log(ev.w) / Math.log(price); // -1 is a fair leg; higher is better
         if (!best || eff > best.eff)
-          best = {
-            match: `${e.home} vs ${e.away}`,
-            date: e.date,
-            label: legLabel(leg, e.home, e.away),
-            odds: price,
-            p: ev.w,
-            eff,
-          };
+          best = { match, date: e.date, label: legLabel(leg, e.home, e.away), odds: price, p: ev.w, eff };
       }
-      if (best) pool.push(best);
+      const prev = pool.get(match);
+      if (best && (!prev || best.eff > prev.eff)) pool.set(match, best);
     }
-    return pool.sort((x, y) => y.eff - x.eff);
+    return [...pool.values()].sort((x, y) => y.eff - x.eff);
   };
 
   // YOLO never comes back empty: prefer +EV legs, relax to near-fair, then to
@@ -317,10 +313,12 @@ export function buildParlays(
   } = {}
 ): ParlayPick[] {
   const { minLegEdge = 0.02, minLegProb = 0.3, maxLegs = 3, poolSize = 8, cap = 20 } = opts;
-  // best value leg per match — one leg per match keeps legs independent
+  // best value leg per match — one leg per fixture keeps legs independent and
+  // placeable (bookmakers reject two outcomes from the same match in a parlay)
   type PoolLeg = { match: string; date?: string; label: string; odds: number; p: number; edge: number };
-  const pool: PoolLeg[] = [];
+  const byMatch = new Map<string, PoolLeg>();
   for (const e of events) {
+    const match = `${e.home} vs ${e.away}`;
     const grid = model.scoreGrid(e.home, e.away, true);
     let best: PoolLeg | null = null;
     for (const { leg, price } of e.legs) {
@@ -328,18 +326,12 @@ export function buildParlays(
       if (!ev.binary || ev.w < minLegProb) continue;
       const edge = ev.w * price - 1;
       if (edge >= minLegEdge && (!best || edge > best.edge))
-        best = {
-          match: `${e.home} vs ${e.away}`,
-          date: e.date,
-          label: legLabel(leg, e.home, e.away),
-          odds: price,
-          p: ev.w,
-          edge,
-        };
+        best = { match, date: e.date, label: legLabel(leg, e.home, e.away), odds: price, p: ev.w, edge };
     }
-    if (best) pool.push(best);
+    const prev = byMatch.get(match);
+    if (best && (!prev || best.edge > prev.edge)) byMatch.set(match, best);
   }
-  pool.sort((x, y) => y.edge - x.edge);
+  const pool = [...byMatch.values()].sort((x, y) => y.edge - x.edge);
   const top = pool.slice(0, poolSize);
   const out: ParlayPick[] = [];
   for (let k = 2; k <= Math.min(maxLegs, top.length); k++)
