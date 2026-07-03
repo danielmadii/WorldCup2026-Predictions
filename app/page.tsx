@@ -18,7 +18,8 @@ type ParlayPick = {
   ev: number; kellyQuarter: number;
 };
 
-const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
+const pct = (x: number) => `${(100 * x).toFixed(x < 0.01 ? 2 : 1)}%`;
+const xOdds = (o: number) => (o >= 1000 ? Math.round(o).toLocaleString("en-US") : o.toFixed(2));
 const day = (iso?: string) => {
   if (!iso) return "";
   const d = new Date(iso);
@@ -45,12 +46,13 @@ function Skeleton({ rows = 4 }: { rows?: number }) {
 }
 
 export default function Page() {
-  const [tab, setTab] = useState<"value" | "builders" | "parlays">("value");
+  const [tab, setTab] = useState<"value" | "builders" | "parlays" | "yolo">("value");
   const [bankroll, setBankroll] = useState(10);
   const [minEdge, setMinEdge] = useState(0.03);
   const [value, setValue] = useState<ValuePick[] | null>(null);
   const [builders, setBuilders] = useState<BuilderPick[] | null>(null);
   const [parlays, setParlays] = useState<ParlayPick[] | null>(null);
+  const [yolo, setYolo] = useState<ParlayPick[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -70,6 +72,7 @@ export default function Page() {
       setValue(v.picks);
       setBuilders(c.builders);
       setParlays(c.parlays);
+      setYolo(c.yolo);
     } catch (e: any) { setErr(e.message); }
     setBusy(false);
   };
@@ -186,6 +189,7 @@ export default function Page() {
           ["value", "Value bets", value?.length],
           ["builders", "Bet builders", builders?.length],
           ["parlays", "Parlays", parlays?.length],
+          ["yolo", "YOLO bets", yolo?.length],
         ] as const).map(([k, label, n]) => (
           <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>
             {label}{n !== undefined && <span className="count">{n}</span>}
@@ -323,6 +327,55 @@ export default function Page() {
               </article>
             ))}
           </div>
+        )}
+      </section>
+      )}
+
+      {tab === "yolo" && (
+      <section className="panel">
+        <div className="head">
+          YOLO bets <small>1,000×+ lottery tickets built from the model&apos;s smartest legs</small>
+        </div>
+        {loading && !yolo && <Skeleton rows={3} />}
+        {yolo && yolo.length === 0 && (
+          <div className="note">Not enough model-approved matches on the board to build a 1,000× ticket right now.</div>
+        )}
+        {yolo && yolo.length > 0 && (
+          <>
+            <div className="slipgrid">
+              {yolo.map((p, i) => (
+                <article className="slip" key={i}>
+                  <div className="sliphead">
+                    <span className="team">{p.legs.length}-leg YOLO</span>
+                    <time>pays {xOdds(p.combinedOdds)}×</time>
+                  </div>
+                  <ul className="legs">
+                    {p.legs.map((l, j) => (
+                      <li key={j}>
+                        <span>
+                          <span className="team">{l.match.replace(" vs ", " – ")}</span>
+                          <br />{l.label}
+                        </span>
+                        <span className="lodds">@{l.odds.toFixed(2)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="slipfoot">
+                    <div className="stat"><label>Odds</label><b>{xOdds(p.combinedOdds)}</b></div>
+                    <div className="stat"><label>Win chance</label><b>{pct(p.modelProb)}</b></div>
+                    <div className="stat"><label>Fair</label><b>{xOdds(1 / p.modelProb)}</b></div>
+                    <div className="stat"><label>Edge</label><b className="chip">+{(100 * p.ev).toFixed(0)}%</b></div>
+                    <div className="stat"><label>$1 pays</label><b>${xOdds(p.combinedOdds)}</b></div>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="note">
+              Every leg is a bet the model rates at or above the bookmaker&apos;s price — this is the
+              smartest route to 1,000×, not a safe one. Even the best ticket loses ~99% of the time:
+              stake pocket change you&apos;d happily burn.
+            </div>
+          </>
         )}
       </section>
       )}

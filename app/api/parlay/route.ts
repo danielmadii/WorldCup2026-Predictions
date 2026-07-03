@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getModel, fetchWorldCupOdds } from "@/lib/engine";
-import { buildBetBuilders, buildParlays } from "@/lib/combo";
+import { buildBetBuilders, buildParlays, buildYoloParlays } from "@/lib/combo";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -14,6 +14,7 @@ export async function GET(req: Request) {
     return NextResponse.json({
       builders: buildBetBuilders(model, events, { minEdge, maxLegs }),
       parlays: buildParlays(model, events, { maxLegs }),
+      yolo: buildYoloParlays(model, events),
     });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });

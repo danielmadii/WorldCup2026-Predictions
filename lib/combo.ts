@@ -230,6 +230,77 @@ export type ParlayPick = {
   kellyQuarter: number;
 };
 
+/**
+ * Lottery tickets: parlays whose combined odds reach targetOdds, built from
+ * model-approved legs. Maximizing log(p)/log(odds) picks the legs that climb
+ * toward the target while giving up the least win probability.
+ */
+export function buildYoloParlays(
+  model: MatchModel,
+  events: EventOdds[],
+  opts: { targetOdds?: number; maxLegs?: number; cap?: number } = {}
+): ParlayPick[] {
+  const { targetOdds = 1000, maxLegs = 16, cap = 6 } = opts;
+  // a ticket can only reach the target within maxLegs if legs average
+  // targetOdds^(1/maxLegs); short favorite legs can never compound there
+  const minLegOdds = Math.pow(targetOdds, 1 / maxLegs) * 0.95;
+
+  const poolFor = (minLegEdge: number) => {
+    type PoolLeg = { match: string; date?: string; label: string; odds: number; p: number; eff: number };
+    const pool: PoolLeg[] = [];
+    for (const e of events) {
+      const grid = model.scoreGrid(e.home, e.away, true);
+      let best: PoolLeg | null = null;
+      for (const { leg, price } of e.legs) {
+        const ev = evalLeg(grid, leg, price);
+        if (!ev.binary || price < minLegOdds || ev.w <= 0 || ev.w >= 0.97) continue;
+        if (ev.w * price - 1 < minLegEdge) continue;
+        const eff = Math.log(ev.w) / Math.log(price); // -1 is a fair leg; higher is better
+        if (!best || eff > best.eff)
+          best = {
+            match: `${e.home} vs ${e.away}`,
+            date: e.date,
+            label: legLabel(leg, e.home, e.away),
+            odds: price,
+            p: ev.w,
+            eff,
+          };
+      }
+      if (best) pool.push(best);
+    }
+    return pool.sort((x, y) => y.eff - x.eff);
+  };
+
+  // prefer +EV legs; relax to near-fair legs if they can't reach the target
+  let pool = poolFor(0);
+  if (pool.reduce((s, l) => s + Math.log(l.odds), 0) < Math.log(targetOdds))
+    pool = poolFor(-0.05);
+
+  // disjoint tickets: each takes the best remaining legs until the target is hit
+  const out: ParlayPick[] = [];
+  let i = 0;
+  while (out.length < cap && i < pool.length) {
+    const legs: typeof pool = [];
+    let odds = 1;
+    while (i < pool.length && legs.length < maxLegs && odds < targetOdds) {
+      legs.push(pool[i]);
+      odds *= pool[i].odds;
+      i++;
+    }
+    if (odds < targetOdds) break;
+    const p = legs.reduce((x, l) => x * l.p, 1);
+    out.push({
+      legs: legs.map((l) => ({ match: l.match, label: l.label, odds: l.odds, modelProb: l.p, date: l.date })),
+      combinedOdds: odds,
+      modelProb: p,
+      impliedProb: 1 / odds,
+      ev: p * odds - 1,
+      kellyQuarter: kelly(p, odds) / 4,
+    });
+  }
+  return out.sort((x, y) => y.modelProb - x.modelProb);
+}
+
 export function buildParlays(
   model: MatchModel,
   events: EventOdds[],
