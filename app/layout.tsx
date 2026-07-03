@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "WC26 Odds Desk",
-  description: "Elo + Poisson model desk for the 2026 World Cup",
+  title: "WC26 Value Desk",
+  description: "Model vs Cloudbet — value bets, bet builders and parlays for the 2026 World Cup",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

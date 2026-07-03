@@ -13,12 +13,27 @@ type BuilderPick = {
   correlation: number; ev: number; kellyQuarter: number;
 };
 type ParlayPick = {
-  legs: { match: string; label: string; odds: number; modelProb: number }[];
+  legs: { match: string; label: string; odds: number; modelProb: number; date?: string }[];
   combinedOdds: number; modelProb: number; impliedProb: number;
   ev: number; kellyQuarter: number;
 };
 
 const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
+const day = (iso?: string) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+};
+
+function Skeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className="skeleton" aria-hidden>
+      {Array.from({ length: rows }, (_, i) => (
+        <i key={i} style={{ width: `${90 - i * 12}%` }} />
+      ))}
+    </div>
+  );
+}
 
 export default function Page() {
   const [bankroll, setBankroll] = useState(1000);
@@ -29,20 +44,18 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const scan = async () => {
+  const scan = async (edge = minEdge) => {
     setBusy(true); setErr("");
     try {
+      const get = async (url: string) => {
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error ?? "request failed");
+        return j;
+      };
       const [v, c] = await Promise.all([
-        fetch(`/api/value?minEdge=${minEdge}`).then(async (r) => {
-          const j = await r.json();
-          if (!r.ok) throw new Error(j.error ?? "request failed");
-          return j;
-        }),
-        fetch(`/api/parlay?minEdge=${Math.max(minEdge, 0.05)}&maxLegs=3`).then(async (r) => {
-          const j = await r.json();
-          if (!r.ok) throw new Error(j.error ?? "request failed");
-          return j;
-        }),
+        get(`/api/value?minEdge=${edge}`),
+        get(`/api/parlay?minEdge=${Math.max(edge, 0.05)}&maxLegs=3`),
       ]);
       setValue(v.picks);
       setBuilders(c.builders);
@@ -52,65 +65,104 @@ export default function Page() {
   };
   useEffect(() => { scan(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const stake = (kq: number) => `$${(bankroll * kq).toFixed(0)}`;
+  const stake = (kq: number) => `$${Math.round(bankroll * kq)}`;
   const maxEv = useMemo(() => Math.max(0.001, ...(value ?? []).map((p) => p.ev)), [value]);
+  const needsKey = err.includes("CLOUDBET_API_KEY");
+  const loading = busy && !err;
 
   return (
     <div className="wrap">
       <header className="masthead">
         <h1>WC26 <span>Value Desk</span></h1>
-        <div className="meta">
-          model vs Cloudbet · 1X2, handicaps, totals,<br />
-          team totals, BTTS, double chance, draw no bet
-        </div>
+        <p className="tagline">
+          A model prices every World Cup match from 150 years of results. When Cloudbet
+          pays more than the model&apos;s fair price, the bet shows up here.
+        </p>
       </header>
 
       <section className="panel">
-        <div className="controls">
+        <div className="toolbar">
           <label className="field">Bankroll $
             <input type="number" min={0} step={100} value={bankroll}
               onChange={(e) => setBankroll(Number(e.target.value))} />
           </label>
           <label className="field">Min edge
-            <input type="number" step={0.01} min={0} max={0.5} value={minEdge}
-              onChange={(e) => setMinEdge(Number(e.target.value))} />
+            <select value={minEdge} onChange={(e) => { const v = Number(e.target.value); setMinEdge(v); scan(v); }}>
+              <option value={0.02}>+2% — show more</option>
+              <option value={0.03}>+3% — balanced</option>
+              <option value={0.05}>+5% — solid only</option>
+              <option value={0.08}>+8% — strongest</option>
+            </select>
           </label>
-          <button className="btn" onClick={scan} disabled={busy}>
-            {busy ? "Scanning…" : "Scan"}
+          <div className="spacer" />
+          <button className="btn" onClick={() => scan()} disabled={busy}>
+            {busy ? "Scanning…" : "Rescan"}
           </button>
         </div>
-        {err && (
-          <div className="err">
-            {err}
-            {err.includes("CLOUDBET_API_KEY") && " — add it to .env.local or Vercel → Settings → Environment Variables."}
+        <dl className="howto">
+          <div>
+            <dt>Odds</dt>
+            <dd>What Cloudbet pays per $1 if the bet wins.</dd>
           </div>
-        )}
-        {busy && !err && <div className="note">Training model and scanning Cloudbet markets…</div>}
+          <div>
+            <dt>Win chance</dt>
+            <dd>How often the model thinks this bet wins.</dd>
+          </div>
+          <div>
+            <dt>Edge</dt>
+            <dd>Average profit if you made this bet many times. +5% ≈ $5 per $100 staked. A bigger edge is a better price — not a safer bet.</dd>
+          </div>
+          <div>
+            <dt>Bet</dt>
+            <dd>Suggested stake (¼ Kelly of bankroll) — sized so a losing streak can&apos;t sink you.</dd>
+          </div>
+        </dl>
       </section>
 
+      {needsKey && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <div className="setup">
+            <h2>Connect Cloudbet to start</h2>
+            <ol>
+              <li>Log in at cloudbet.com → <b>My Account → API</b> and copy your API key.</li>
+              <li>Create <code>.env.local</code> in the project with <code>CLOUDBET_API_KEY=your-key</code>.</li>
+              <li>Restart the app and hit <b>Rescan</b>.</li>
+            </ol>
+          </div>
+        </section>
+      )}
+      {err && !needsKey && (
+        <section className="panel" style={{ marginTop: 16 }}><div className="err">{err}</div></section>
+      )}
+
+      {!needsKey && <>
       <section className="panel" style={{ marginTop: 16 }}>
-        <div className="head">Value bets — single selections</div>
-        {value && value.length === 0 && <div className="note">Nothing above the edge threshold right now.</div>}
+        <div className="head">Value bets <small>single bets where the price beats the model</small></div>
+        {loading && !value && <Skeleton rows={5} />}
+        {value && value.length === 0 && <div className="note">Nothing above your edge threshold right now — try a lower minimum.</div>}
         {value && value.length > 0 && (
           <div style={{ overflowX: "auto" }}>
             <table className="board">
               <thead>
                 <tr>
                   <th>Match</th><th>Bet</th>
-                  <th className="num">Odds</th><th className="num">Model</th>
-                  <th>Edge</th><th className="num">Stake</th>
+                  <th className="num">Odds</th><th className="num">Win chance</th>
+                  <th>Edge</th><th className="num">Bet</th>
                 </tr>
               </thead>
               <tbody>
                 {value.map((p, i) => (
                   <tr key={i}>
-                    <td className="team">{p.match}</td>
+                    <td>
+                      <div className="team">{p.match}</div>
+                      {p.date && <div className="sub">{day(p.date)}</div>}
+                    </td>
                     <td>{p.bet}</td>
                     <td className="num">{p.odds.toFixed(2)}</td>
                     <td className="num">{pct(p.modelProb)}</td>
-                    <td className="evcell">
-                      <span className="evbar" style={{ width: `${(p.ev / maxEv) * 100}%` }} />
-                      <span className="evtxt">+{(100 * p.ev).toFixed(1)}%</span>
+                    <td className="edgecell">
+                      <div className="edgeval">+{(100 * p.ev).toFixed(1)}%</div>
+                      <div className="meter"><span style={{ width: `${(p.ev / maxEv) * 100}%` }} /></div>
                     </td>
                     <td className="num">{stake(p.kellyQuarter)}</td>
                   </tr>
@@ -122,77 +174,81 @@ export default function Page() {
       </section>
 
       <section className="panel" style={{ marginTop: 16 }}>
-        <div className="head">Bet builders — same game</div>
+        <div className="head">Bet builders <small>combos inside one match — legs rise and fall together</small></div>
+        {loading && !builders && <Skeleton rows={3} />}
         {builders && builders.length === 0 && <div className="note">No same-game combos above the edge threshold.</div>}
         {builders && builders.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table className="board">
-              <thead>
-                <tr>
-                  <th>Match</th><th>Legs</th>
-                  <th className="num">Odds*</th><th className="num">Model</th>
-                  <th className="num">Fair</th><th className="num">Edge</th><th className="num">Stake</th>
-                </tr>
-              </thead>
-              <tbody>
-                {builders.map((b, i) => (
-                  <tr key={i}>
-                    <td className="team">{b.match}</td>
-                    <td>{b.legs.map((l, j) => <div key={j}>{l.label} <span style={{ opacity: 0.55 }}>@{l.odds.toFixed(2)}</span></div>)}</td>
-                    <td className="num">{b.combinedOdds.toFixed(2)}</td>
-                    <td className="num">{pct(b.modelProb)}</td>
-                    <td className="num">{b.fairOdds.toFixed(2)}</td>
-                    <td className="num evtxt">+{(100 * b.ev).toFixed(1)}%</td>
-                    <td className="num">{stake(b.kellyQuarter)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {builders && builders.length > 0 && (
-          <div className="note">
-            * Product of single prices — Cloudbet&apos;s actual bet-builder quote reprices correlated legs.
-            Only bet if their quote is at or above the Fair column.
-          </div>
+          <>
+            <div className="slipgrid">
+              {builders.map((b, i) => (
+                <article className="slip" key={i}>
+                  <div className="sliphead">
+                    <span className="team">{b.match}</span>
+                    {b.date && <time>{day(b.date)}</time>}
+                  </div>
+                  <ul className="legs">
+                    {b.legs.map((l, j) => (
+                      <li key={j}><span>{l.label}</span><span className="lodds">@{l.odds.toFixed(2)}</span></li>
+                    ))}
+                  </ul>
+                  <div className="slipfoot">
+                    <div className="stat"><label>Odds</label><b>{b.combinedOdds.toFixed(2)}</b></div>
+                    <div className="stat"><label>Fair</label><b>{b.fairOdds.toFixed(2)}</b></div>
+                    <div className="stat"><label>Win chance</label><b>{pct(b.modelProb)}</b></div>
+                    <div className="stat"><label>Edge</label><b className="chip">+{(100 * b.ev).toFixed(0)}%</b></div>
+                    <div className="stat"><label>Bet</label><b>{stake(b.kellyQuarter)}</b></div>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="note">
+              Odds here multiply the single prices. Cloudbet&apos;s real bet-builder quote reprices
+              linked legs — build the slip on their site and only bet if their quote is at or above <b>Fair</b>.
+            </div>
+          </>
         )}
       </section>
 
       <section className="panel" style={{ marginTop: 16 }}>
-        <div className="head">Parlays — across matches</div>
+        <div className="head">Parlays <small>combos across matches — all legs must win</small></div>
+        {loading && !parlays && <Skeleton rows={3} />}
         {parlays && parlays.length === 0 && <div className="note">No qualifying legs right now.</div>}
         {parlays && parlays.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table className="board">
-              <thead>
-                <tr>
-                  <th>Legs</th>
-                  <th className="num">Odds</th><th className="num">Model</th>
-                  <th className="num">Edge</th><th className="num">Stake</th>
-                </tr>
-              </thead>
-              <tbody>
-                {parlays.map((p, i) => (
-                  <tr key={i}>
-                    <td>{p.legs.map((l, j) => (
-                      <div key={j}><span className="team">{l.match}</span> — {l.label} <span style={{ opacity: 0.55 }}>@{l.odds.toFixed(2)}</span></div>
-                    ))}</td>
-                    <td className="num">{p.combinedOdds.toFixed(2)}</td>
-                    <td className="num">{pct(p.modelProb)}</td>
-                    <td className="num evtxt">+{(100 * p.ev).toFixed(1)}%</td>
-                    <td className="num">{stake(p.kellyQuarter)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="slipgrid">
+            {parlays.map((p, i) => (
+              <article className="slip" key={i}>
+                <div className="sliphead">
+                  <span className="team">{p.legs.length}-leg parlay</span>
+                  <time>pays {p.combinedOdds.toFixed(2)}×</time>
+                </div>
+                <ul className="legs">
+                  {p.legs.map((l, j) => (
+                    <li key={j}>
+                      <span>
+                        <span className="team">{l.match.replace(" vs ", " – ")}</span>
+                        <br />{l.label}
+                      </span>
+                      <span className="lodds">@{l.odds.toFixed(2)}</span>
+                    </li>
+                  ))}
+                </ul>
+                <div className="slipfoot">
+                  <div className="stat"><label>Odds</label><b>{p.combinedOdds.toFixed(2)}</b></div>
+                  <div className="stat"><label>Win chance</label><b>{pct(p.modelProb)}</b></div>
+                  <div className="stat"><label>Edge</label><b className="chip">+{(100 * p.ev).toFixed(0)}%</b></div>
+                  <div className="stat"><label>Bet</label><b>{stake(p.kellyQuarter)}</b></div>
+                </div>
+              </article>
+            ))}
           </div>
         )}
       </section>
+      </>}
 
       <p className="note" style={{ paddingLeft: 0 }}>
-        Goal-based markets only — corners and cards trade on Cloudbet but the model has no corners/cards
-        data, so it won&apos;t price them. Stakes are quarter-Kelly on your bankroll; edges are model
-        estimates, not guarantees. Never bet more than you can afford to lose.
+        Goal markets only — corners and cards trade on Cloudbet, but the model has no corners or
+        cards data, so it won&apos;t pretend to price them. Edges are model estimates, not guarantees.
+        Never bet more than you can afford to lose.
       </p>
     </div>
   );
