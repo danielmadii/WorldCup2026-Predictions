@@ -62,12 +62,14 @@ label.field {
   font-family: var(--font-mono); font-size: 10.5px;
   text-transform: uppercase; letter-spacing: 1px; color: var(--chalk-dim);
 }
-input[type="number"], select {
+input[type="number"], input[type="date"], select {
   background: var(--pitch-900); color: var(--chalk);
   border: 1px solid var(--line); padding: 8px 10px; width: 130px;
   font-family: var(--font-mono); font-size: 13px;
+  color-scheme: dark; /* native calendar popup renders dark */
 }
 select { width: 170px; }
+input[type="date"] { width: 150px; }
 input:focus-visible, select:focus-visible, .btn:focus-visible, details summary:focus-visible {
   outline: 2px solid var(--signal); outline-offset: -1px;
 }

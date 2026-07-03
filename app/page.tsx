@@ -68,6 +68,16 @@ export default function Page() {
   const [anoms, setAnoms] = useState<Anomaly[] | null>(null);
   const [matches, setMatches] = useState<MatchInfo[] | null>(null);
   const [sel, setSel] = useState<Set<number> | null>(null); // null = all matches
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+
+  const inRange = (m: MatchInfo) => {
+    const d = (m.date ?? "").slice(0, 10);
+    const swap = fromDate && toDate && fromDate > toDate;
+    const lo = swap ? toDate : fromDate;
+    const hi = swap ? fromDate : toDate;
+    return (!lo || d >= lo) && (!hi || d <= hi);
+  };
   const [autoRef, setAutoRef] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -81,7 +91,12 @@ export default function Page() {
         if (!r.ok) throw new Error(j.error ?? "request failed");
         return j;
       };
-      const ids = selected ? `&ids=${[...selected].join(",")}` : "";
+      let ids = "";
+      if (matches && (selected || fromDate || toDate)) {
+        const chosen = matches.filter((m) => inRange(m) && (!selected || selected.has(m.id))).map((m) => m.id);
+        // "-1" forces an empty board rather than silently scanning everything
+        ids = chosen.length === matches.length ? "" : `&ids=${chosen.length ? chosen.join(",") : "-1"}`;
+      }
       const [v, c, a, m] = await Promise.all([
         get(`/api/value?minEdge=${edge}${ids}`),
         get(`/api/parlay?minEdge=${Math.max(edge, 0.05)}&maxLegs=3${ids}`),
@@ -172,6 +187,14 @@ export default function Page() {
               <option value={0.08}>+8% — strongest</option>
             </select>
           </label>
+          <label className="field">From
+            <input type="date" value={fromDate}
+              onChange={(e) => { setFromDate(e.target.value); setSel(null); }} />
+          </label>
+          <label className="field">To
+            <input type="date" value={toDate}
+              onChange={(e) => { setToDate(e.target.value); setSel(null); }} />
+          </label>
           <div className="spacer" />
           <button className="btn" onClick={() => scan()} disabled={busy}>
             {busy ? "Scanning…" : "Rescan"}
@@ -199,39 +222,45 @@ export default function Page() {
             <dd>What comes back if the bet wins — bet × odds, your stake included.</dd>
           </div>
         </dl>
-        {matches && matches.length > 0 && (
-          <details className="picker">
-            <summary>
-              Matches — {sel ? sel.size : matches.length} of {matches.length} selected
-              <span className="hint">pick the games you want bets on, then Rescan</span>
-            </summary>
-            <div className="pickbar">
-              <button className="btn ghost" onClick={() => setSel(null)}>All</button>
-              <button className="btn ghost" onClick={() => setSel(new Set())}>None</button>
-            </div>
-            <div className="pickgrid">
-              {matches.map((m) => {
-                const on = sel ? sel.has(m.id) : true;
-                return (
-                  <label key={m.id} className={`pick ${on ? "on" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => {
-                        const next = new Set(sel ?? matches.map((x) => x.id));
-                        if (on) next.delete(m.id);
-                        else next.add(m.id);
-                        setSel(next.size === matches.length ? null : next);
-                      }}
-                    />
-                    <span className="sub">{day(m.date)}</span>
-                    <span>{m.home} vs {m.away}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </details>
-        )}
+        {matches && matches.length > 0 && (() => {
+          const pool = matches.filter(inRange);
+          const nSel = pool.filter((m) => !sel || sel.has(m.id)).length;
+          return (
+            <details className="picker">
+              <summary>
+                Matches — {nSel} of {pool.length} selected
+                {(fromDate || toDate) && <span className="hint">date filter on · {matches.length - pool.length} hidden</span>}
+                {!fromDate && !toDate && <span className="hint">pick the games you want bets on, then Rescan</span>}
+              </summary>
+              <div className="pickbar">
+                <button className="btn ghost" onClick={() => setSel(null)}>All</button>
+                <button className="btn ghost" onClick={() => setSel(new Set())}>None</button>
+              </div>
+              {pool.length === 0 && <div className="note">No matches between those dates — widen the range.</div>}
+              <div className="pickgrid">
+                {pool.map((m) => {
+                  const on = sel ? sel.has(m.id) : true;
+                  return (
+                    <label key={m.id} className={`pick ${on ? "on" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() => {
+                          const next = new Set(sel ?? pool.map((x) => x.id));
+                          if (on) next.delete(m.id);
+                          else next.add(m.id);
+                          setSel(next.size === pool.length ? null : next);
+                        }}
+                      />
+                      <span className="sub">{day(m.date)}</span>
+                      <span>{m.home} vs {m.away}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </details>
+          );
+        })()}
       </section>
 
       {needsKey && (
